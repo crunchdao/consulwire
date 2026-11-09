@@ -9,7 +9,6 @@ import anyio
 import httpx
 import pytest
 from starlette.applications import Starlette
-from starlette.testclient import TestClient
 
 from consulwire import HTTPStatusError
 from consulwire.integrations.fastapi import ConsulLifespan
@@ -24,10 +23,13 @@ def agent() -> InMemoryAgent:
     return InMemoryAgent()
 
 
-def test_tests_an_integration_without_consul(agent: InMemoryAgent) -> None:
-    lifespan = ConsulLifespan(name="my-service", port=8000, consul=agent.async_consul())
+@pytest.mark.anyio
+async def test_tests_an_integration_without_consul(agent: InMemoryAgent) -> None:
+    application = Starlette(
+        lifespan=ConsulLifespan(name="my-service", port=8000, consul=agent.async_consul())
+    )
 
-    with TestClient(Starlette(lifespan=lifespan)):
+    async with application.router.lifespan_context(application):
         assert agent.services["my-service"]["Port"] == 8000
 
     assert agent.services == {}
