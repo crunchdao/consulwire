@@ -61,4 +61,25 @@ class TCPCheck(TypedDict, total=False):
     name: str
 
 
-Check: TypeAlias = "HTTPCheck | TCPCheck"
+@final
+class TTLCheck(TypedDict, total=False):
+    """Healthy while the service itself reports so, before the time to live runs out.
+
+    The service calls :meth:`consulwire.agent.Agent.pass_check` regularly, more often than ``ttl``.
+    The check starts critical, until the first report.
+
+    Attributes:
+        ttl: Time after the last report before the check turns critical.
+        deregister_critical_after: See :class:`HTTPCheck`.
+        id: Check ID, to report to. ``service:<service id>`` by default, followed by ``:1``,
+            ``:2``... when the service has several checks: giving one is clearer.
+        name: Check name shown in the UI.
+    """
+
+    ttl: Required[timedelta]
+    deregister_critical_after: timedelta
+    id: str
+    name: str
+
+
+Check: TypeAlias = "HTTPCheck | TCPCheck | TTLCheck"

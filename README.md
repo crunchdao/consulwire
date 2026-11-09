@@ -9,6 +9,7 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 	- [Usage](#usage)
 		- [Register a Service](#register-a-service)
 		- [Health Checks](#health-checks)
+		- [Report a TTL Check](#report-a-ttl-check)
 		- [Deregister a Service](#deregister-a-service)
 	- [Key/Value Store](#keyvalue-store)
 		- [Read and Write](#read-and-write)
@@ -137,22 +138,25 @@ consul.agent.register_service(
         {"http": "http://my-service:8000/health", "interval": timedelta(seconds=10)},
         # healthy while a TCP connection can be opened
         {"tcp": "my-service:8000", "interval": timedelta(seconds=30)},
+        # healthy while the service reports so, see below
+        {"ttl": timedelta(seconds=30), "id": "my-service-alive"},
     ],
 )
 ```
 
-| Key                         | Checks | Meaning                                                         |
-| --------------------------- | ------ | --------------------------------------------------------------- |
-| `http`                      | HTTP   | URL the agent requests, as reachable from the agent.            |
-| `tcp`                       | TCP    | `host:port` the agent connects to, as reachable from the agent. |
-| `interval`                  | both   | Time between two checks. Required.                              |
-| `timeout`                   | both   | Time before a check counts as failed, 10 seconds by default.    |
-| `method`                    | HTTP   | HTTP method, `GET` by default.                                  |
-| `headers`                   | HTTP   | Request headers, such as `{"Authorization": "..."}`.            |
-| `tls_skip_verify`           | HTTP   | Accept any TLS certificate.                                     |
-| `deregister_critical_after` | both   | Remove the service once the check has been failing this long.   |
-| `id`                        | both   | Check ID, `service:<service id>` by default.                    |
-| `name`                      | both   | Check name shown in the Consul UI.                              |
+| Key                         | Checks    | Meaning                                                         |
+| --------------------------- | --------- | --------------------------------------------------------------- |
+| `http`                      | HTTP      | URL the agent requests, as reachable from the agent.            |
+| `tcp`                       | TCP       | `host:port` the agent connects to, as reachable from the agent. |
+| `ttl`                       | TTL       | Time after the last report before the check turns critical.     |
+| `interval`                  | HTTP, TCP | Time between two checks. Required.                              |
+| `timeout`                   | HTTP, TCP | Time before a check counts as failed, 10 seconds by default.    |
+| `method`                    | HTTP      | HTTP method, `GET` by default.                                  |
+| `headers`                   | HTTP      | Request headers, such as `{"Authorization": "..."}`.            |
+| `tls_skip_verify`           | HTTP      | Accept any TLS certificate.                                     |
+| `deregister_critical_after` | all       | Remove the service once the check has been failing this long.   |
+| `id`                        | all       | Check ID, `service:<service id>` by default.                    |
+| `name`                      | all       | Check name shown in the Consul UI.                              |
 
 > [!NOTE]
 > Consul counts a `429 Too Many Requests` answer as a warning, and any other non-2xx answer as critical. <br />
@@ -161,8 +165,32 @@ consul.agent.register_service(
 To annotate a variable, the types are in `consulwire.agent`:
 
 ```python
-from consulwire.agent import Check, HTTPCheck, TCPCheck
+from consulwire.agent import Check, HTTPCheck, TCPCheck, TTLCheck
 ```
+
+### Report a TTL Check
+
+With a TTL check, Consul does not call the service: the service reports its own health, more often than the `ttl`. It fits a process without an HTTP server, like a queue consumer, and reports from inside the work itself, so a stuck loop shows as unhealthy.
+
+```python
+while True:
+    consume_messages()
+
+    consul.agent.pass_check("my-service-alive", note="42 messages consumed")
+```
+
+| Call                             | Status   | Healthy |
+| -------------------------------- | -------- | ------- |
+| `consul.agent.pass_check(id)`    | passing  | yes     |
+| `consul.agent.warn_check(id)`    | warning  | no      |
+| `consul.agent.fail_check(id)`    | critical | no      |
+| no report for `ttl`              | critical | no      |
+
+The `note` is shown with the status in the Consul UI.
+
+> [!NOTE]
+> A TTL check starts critical: the instance is not healthy until its first report. <br />
+> Without an `id`, the check is named `service:<service id>`, followed by `:1`, `:2`... when the service has several checks: an `id` of your own is easier to report to.
 
 ### Deregister a Service
 
@@ -433,7 +461,7 @@ assert agent.services == {}  # deregistered at shutdown
 | `agent.requests`                               | Every request received, as `httpx.Request`.                                    |
 | `agent.set_passing(service_id, passing=False)` | Make an instance fail its checks, to test a caller: it leaves `health.service`. |
 
-Instances pass their checks until told otherwise. Other endpoints answer `404`.
+Instances pass their checks until told otherwise, except the ones with a TTL check, which start critical until they report. The time to live itself never runs out. Other endpoints answer `404`.
 
 # Integrations
 

@@ -67,8 +67,12 @@ def raw_client(agent: InMemoryAgent) -> httpx.Client:
 
 @pytest.mark.parametrize(
     ("method", "path"),
-    [("GET", "/v1/session/list"), ("POST", "/v1/catalog/services")],
-    ids=["another endpoint", "another method"],
+    [
+        ("GET", "/v1/session/list"),
+        ("POST", "/v1/catalog/services"),
+        ("PUT", "/v1/agent/check/update/consumer-alive"),
+    ],
+    ids=["another endpoint", "another method", "another check report"],
 )
 def test_other_endpoints_answer_not_found(agent: InMemoryAgent, method: str, path: str) -> None:
     with raw_client(agent) as client:

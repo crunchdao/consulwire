@@ -18,6 +18,10 @@ Example:
     ```python
     agent.set_passing("scoring-service-1", passing=False)
     ```
+
+    An instance with a TTL check starts critical, like in Consul, until it reports with
+    ``consul.agent.pass_check()``. The time to live itself never runs out: a test reports the
+    status it needs.
 """
 
 from __future__ import annotations
@@ -54,6 +58,10 @@ _KV_PATH: Final = "/v1/kv/"
 
 _DEREGISTER_PATH: Final = "/v1/agent/service/deregister/"
 
+_CHECK_PATH: Final = "/v1/agent/check/"
+
+_REPORTED_STATUSES: Final = {"pass": "passing", "warn": "warning", "fail": "critical"}
+
 _CATALOG_SERVICE_PATH: Final = "/v1/catalog/service/"
 
 _HEALTH_SERVICE_PATH: Final = "/v1/health/service/"
@@ -65,10 +73,11 @@ _POLL_INTERVAL: Final = 0.005
 class InMemoryAgent:
     """Answer the requests of consulwire's clients like a Consul agent, from memory.
 
-    Supports registering and deregistering services, listing them through the catalog and health
-    endpoints, and the key/value store with check-and-set. Reads block like Consul's blocking
-    queries. Every request is recorded in :attr:`requests`. Other endpoints answer 404.
-    Thread-safe: a watch can wait in one thread while another writes.
+    Supports registering and deregistering services, reporting their TTL checks, listing them
+    through the catalog and health endpoints, and the key/value store with check-and-set. Reads
+    block like Consul's blocking queries. Each instance has one status, the one of its checks.
+    Every request is recorded in :attr:`requests`. Other endpoints answer 404. Thread-safe: a
+    watch can wait in one thread while another writes.
     """
 
     requests: list[httpx.Request]
@@ -80,7 +89,8 @@ class InMemoryAgent:
         self._condition: threading.Condition = threading.Condition()
         self._index: int = 1
         self._services: dict[str, dict[str, object]] = {}
-        self._failing: set[str] = set()
+        self._statuses: dict[str, str] = {}
+        self._checks: dict[str, str] = {}
         self._entries: dict[str, Entry] = {}
 
     @property
@@ -106,11 +116,7 @@ class InMemoryAgent:
                 message = f"no instance has the ID {service_id!r}"
                 raise LookupError(message)
 
-            if passing:
-                self._failing.discard(service_id)
-            else:
-                self._failing.add(service_id)
-
+            self._statuses[service_id] = "passing" if passing else "critical"
             self._changed()
 
     def consul(self, *, timeout: float = 10.0) -> Consul:
@@ -181,7 +187,12 @@ class InMemoryAgent:
     def _respond(self, request: httpx.Request) -> httpx.Response:
         parameters = dict(request.url.params)
 
-        for respond in (self._respond_kv, self._respond_agent, self._respond_discovery):
+        for respond in (
+            self._respond_kv,
+            self._respond_agent,
+            self._respond_check,
+            self._respond_discovery,
+        ):
             response = respond(request, parameters)
 
             if response is not None:
@@ -207,28 +218,74 @@ class InMemoryAgent:
     ) -> httpx.Response | None:
         path = request.url.path
 
-        if request.method == "PUT" and path == "/v1/agent/service/register":
+        if request.method != "PUT":
+            return None
+
+        if path == "/v1/agent/service/register":
             service = _json_object(request.content)
             service_id = str(service.get("ID") or service.get("Name"))
+            checks = _checks(service)
 
+            self._deregister(service_id)
             self._services[service_id] = service
-            self._failing.discard(service_id)
+            self._statuses[service_id] = (
+                "critical" if any("TTL" in check for check in checks) else "passing"
+            )
+            self._checks.update(
+                (_check_id(service_id, check, number, len(checks)), service_id)
+                for number, check in enumerate(checks, start=1)
+            )
             self._changed()
 
             return httpx.Response(200)
 
-        if request.method == "PUT" and path.startswith(_DEREGISTER_PATH):
+        if path.startswith(_DEREGISTER_PATH):
             service_id = unquote(path.removeprefix(_DEREGISTER_PATH))
 
-            if self._services.pop(service_id, None) is None:
+            if service_id not in self._services:
                 return httpx.Response(404, text=f'Unknown service ID "{service_id}"')
 
-            self._failing.discard(service_id)
+            self._deregister(service_id)
             self._changed()
 
             return httpx.Response(200)
 
         return None
+
+    def _respond_check(
+        self,
+        request: httpx.Request,
+        _parameters: Mapping[str, str],
+    ) -> httpx.Response | None:
+        path = request.url.path
+
+        if request.method != "PUT" or not path.startswith(_CHECK_PATH):
+            return None
+
+        report, _, quoted_check_id = path.removeprefix(_CHECK_PATH).partition("/")
+        status = _REPORTED_STATUSES.get(report)
+
+        if status is None:
+            return None
+
+        check_id = unquote(quoted_check_id)
+        owner = self._checks.get(check_id)
+
+        if owner is None:
+            return httpx.Response(404, text=f'Unknown check ID "{check_id}"')
+
+        self._statuses[owner] = status
+        self._changed()
+
+        return httpx.Response(200)
+
+    def _deregister(self, service_id: str) -> None:
+        """Forget an instance and its checks, if registered."""
+        _ = self._services.pop(service_id, None)
+        _ = self._statuses.pop(service_id, None)
+
+        for check_id in [check for check, owner in self._checks.items() if owner == service_id]:
+            del self._checks[check_id]
 
     def _respond_discovery(
         self,
@@ -261,12 +318,12 @@ class InMemoryAgent:
             instances = [
                 (service_id, service)
                 for service_id, service in self._instances(name, parameters.get("tag"))
-                if not ("passing" in parameters and service_id in self._failing)
+                if "passing" not in parameters or self._statuses[service_id] == "passing"
             ]
 
             return self._read(
                 [
-                    _health_payload(service_id, service, passing=service_id not in self._failing)
+                    _health_payload(service_id, service, self._statuses[service_id])
                     for service_id, service in instances
                 ]
             )
@@ -403,20 +460,35 @@ def _catalog_payload(service_id: str, service: Mapping[str, object]) -> dict[str
 def _health_payload(
     service_id: str,
     service: Mapping[str, object],
-    *,
-    passing: bool,
+    status: str,
 ) -> dict[str, object]:
+    checks = _checks(service) or [{}]
+
     return {
         "Node": {"Node": NODE, "Address": NODE_ADDRESS},
         "Service": _service_payload(service_id, service),
         "Checks": [
             {
-                "CheckID": f"service:{service_id}",
+                "CheckID": _check_id(service_id, check, number, len(checks)),
                 "ServiceID": service_id,
-                "Status": "passing" if passing else "critical",
-            },
+                "Status": status,
+            }
+            for number, check in enumerate(checks, start=1)
         ],
     }
+
+
+def _checks(service: Mapping[str, object]) -> list[dict[str, object]]:
+    return cast("list[dict[str, object]]", service.get("Checks") or [])
+
+
+def _check_id(service_id: str, check: Mapping[str, object], number: int, count: int) -> str:
+    """Return the ID Consul gives a check: its own, or one after its service and position."""
+    given = check.get("CheckID")
+    if isinstance(given, str):
+        return given
+
+    return f"service:{service_id}" if count == 1 else f"service:{service_id}:{number}"
 
 
 def _json_object(content: bytes) -> dict[str, object]:

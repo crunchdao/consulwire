@@ -1,4 +1,4 @@
-"""The agent section: register the services of this machine, and their health checks.
+"""The agent section: register the services of this machine, and report their TTL checks.
 
 Reached through :attr:`consulwire.Consul.agent` and :attr:`consulwire.AsyncConsul.agent`. The check
 types only exist for annotations: a check is a plain dictionary.
@@ -9,14 +9,14 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from consulwire.agent import _requests
-from consulwire.agent._checks import Check, HTTPCheck, TCPCheck
+from consulwire.agent._checks import Check, HTTPCheck, TCPCheck, TTLCheck
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     from consulwire._transport import AsyncTransport, Transport
 
-__all__ = ["Agent", "AsyncAgent", "Check", "HTTPCheck", "TCPCheck"]
+__all__ = ["Agent", "AsyncAgent", "Check", "HTTPCheck", "TCPCheck", "TTLCheck"]
 
 
 class Agent:
@@ -84,6 +84,33 @@ class Agent:
         """
         _ = self._transport.send(_requests.deregister_service(service_id))
 
+    def pass_check(self, check_id: str, *, note: str | None = None) -> None:
+        """Report a TTL check as passing, for another ``ttl``.
+
+        Args:
+            check_id: Check ID, the ``id`` given to the :class:`TTLCheck`.
+            note: Text shown with the status in the UI, like what the service last did.
+
+        Raises:
+            TransportError: The agent could not be reached.
+            HTTPStatusError: The agent refused the request: 404 when no check has this ID.
+        """
+        _ = self._transport.send(_requests.report_check(check_id, "pass", note=note))
+
+    def warn_check(self, check_id: str, *, note: str | None = None) -> None:
+        """Report a TTL check in warning: the instance stays listed, but not as healthy.
+
+        Raises like :meth:`pass_check`.
+        """
+        _ = self._transport.send(_requests.report_check(check_id, "warn", note=note))
+
+    def fail_check(self, check_id: str, *, note: str | None = None) -> None:
+        """Report a TTL check as critical, without waiting for its ``ttl`` to run out.
+
+        Raises like :meth:`pass_check`.
+        """
+        _ = self._transport.send(_requests.report_check(check_id, "fail", note=note))
+
 
 class AsyncAgent:
     """Agent API of :class:`consulwire.AsyncConsul`, the same as :class:`Agent`."""
@@ -120,3 +147,15 @@ class AsyncAgent:
     async def deregister_service(self, service_id: str) -> None:
         """See :meth:`Agent.deregister_service`."""
         _ = await self._transport.send(_requests.deregister_service(service_id))
+
+    async def pass_check(self, check_id: str, *, note: str | None = None) -> None:
+        """See :meth:`Agent.pass_check`."""
+        _ = await self._transport.send(_requests.report_check(check_id, "pass", note=note))
+
+    async def warn_check(self, check_id: str, *, note: str | None = None) -> None:
+        """See :meth:`Agent.warn_check`."""
+        _ = await self._transport.send(_requests.report_check(check_id, "warn", note=note))
+
+    async def fail_check(self, check_id: str, *, note: str | None = None) -> None:
+        """See :meth:`Agent.fail_check`."""
+        _ = await self._transport.send(_requests.report_check(check_id, "fail", note=note))
