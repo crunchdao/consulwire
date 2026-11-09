@@ -29,6 +29,7 @@ from consulwire.integrations._common import (
     DEFAULT_HEALTH_PATH,
     health_check,
     hide_health_checks,
+    registering_server,
     resolve_address,
 )
 
@@ -62,7 +63,9 @@ class ConsulLifespan:
     shutdown then a startup: the instance is replaced, its ID being the service name.
 
     Registration is skipped, with a log line, when no agent is configured: no ``consul`` given, and
-    neither ``CONSUL_HTTP_ADDR`` nor ``CONSUL_HOST`` set.
+    neither ``CONSUL_HTTP_ADDR`` nor ``CONSUL_HOST`` set. It is also left to gunicorn when
+    :class:`consulwire.integrations.gunicorn.ConsulHooks` registered the application from the main
+    process: the workers restarting then do not touch Consul.
 
     Example:
         With a lifespan of the application's own:
@@ -142,6 +145,12 @@ class ConsulLifespan:
 
         if not self._log_health_checks:
             hide_health_checks(ACCESS_LOGGERS, self.health_path)
+
+        server = registering_server()
+        if server is not None:
+            logger.info("consul registration left to %s - name=%s", server, self.name)
+            yield
+            return
 
         consul, owned = self._agent_client()
         if consul is None:

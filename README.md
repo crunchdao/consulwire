@@ -1,6 +1,6 @@
 # consulwire
 
-A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, and integrations that register Flask and FastAPI applications in it. It ships a synchronous and an asynchronous client with the same API, fully typed.
+A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, and integrations that register Flask, FastAPI and gunicorn applications in it. It ships a synchronous and an asynchronous client with the same API, fully typed.
 
 - [consulwire](#consulwire)
 - [Installation](#installation)
@@ -34,6 +34,11 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 		- [With a Lifespan of your Own](#with-a-lifespan-of-your-own)
 		- [Reload and Workers](#reload-and-workers)
 		- [Options](#options-1)
+	- [gunicorn](#gunicorn)
+		- [Setup](#setup-2)
+		- [Workers](#workers)
+		- [Binary Upgrades](#binary-upgrades)
+		- [Options](#options-2)
 
 # Installation
 
@@ -45,7 +50,7 @@ pip install "consulwire[flask]"
 pip install "consulwire[fastapi]"
 ```
 
-Python 3.10 or newer is required. The client depends on `httpx` and `anyio`.
+Python 3.10 or newer is required. The client depends on `httpx` and `anyio`. The gunicorn integration needs no extra.
 
 # Client
 
@@ -298,12 +303,13 @@ Other endpoints answer `404`.
 
 # Integrations
 
-Each framework has its own module in `consulwire.integrations`, which needs the matching extra:
+Each framework or server has its own module in `consulwire.integrations`. The framework ones need the matching extra:
 
-| Framework                      | Module                            | Extra                 | Entry point       |
-| ------------------------------ | --------------------------------- | --------------------- | ----------------- |
-| Flask                          | `consulwire.integrations.flask`   | `consulwire[flask]`   | `ConsulExtension` |
-| FastAPI, and any Starlette app | `consulwire.integrations.fastapi` | `consulwire[fastapi]` | `ConsulLifespan`  |
+| Framework                      | Module                             | Extra                 | Entry point       |
+| ------------------------------ | ---------------------------------- | --------------------- | ----------------- |
+| Flask                          | `consulwire.integrations.flask`    | `consulwire[flask]`   | `ConsulExtension` |
+| FastAPI, and any Starlette app | `consulwire.integrations.fastapi`  | `consulwire[fastapi]` | `ConsulLifespan`  |
+| gunicorn, with any framework   | `consulwire.integrations.gunicorn` | none                  | `ConsulHooks`     |
 
 ## What Every Integration Does
 
@@ -325,6 +331,8 @@ Consul checks the application at `health_path`, `/health` by default:
 - when the application already has a `GET` route there, it is used as it is, so a real check, like a database ping, stays in charge;
 - otherwise, a route answering `200` is added right before the registration, once every route of the application is declared. FastAPI leaves it out of the OpenAPI schema.
 
+Under gunicorn, the Flask and FastAPI integrations still add it, while [the hooks](#gunicorn) register the application.
+
 ### The Access Logs
 
 Consul calls the health route every 10 seconds. Those calls are hidden from the access logs of the servers, so the logs keep the real traffic:
@@ -333,6 +341,7 @@ Consul calls the health route every 10 seconds. Those calls are hidden from the 
 | ----------- | ----------------------------------- |
 | Flask       | `werkzeug`, `gunicorn.access`       |
 | FastAPI     | `uvicorn.access`, `gunicorn.access` |
+| gunicorn    | `gunicorn.access`, `uvicorn.access` |
 
 Only the `GET` requests of the health route are hidden. `log_health_checks=True` keeps them.
 
@@ -344,6 +353,7 @@ An application is deregistered only when its framework has a shutdown event:
 | ----------- | ---------------------------------- |
 | Flask       | never: Flask has no shutdown event |
 | FastAPI     | at the shutdown of the lifespan    |
+| gunicorn    | when gunicorn exits                |
 
 An instance that stopped without deregistering, after a crash or a `kill -9`, is removed by Consul once its health check has been failing for `deregister_critical_after`, a minute by default, so about a minute and a half with Consul's reaping cycle. Restarting first replaces it: the instance ID is the service name.
 
@@ -398,18 +408,19 @@ With the reloader (`debug=True`, `FLASK_DEBUG=1` or `use_reloader=True`), Flask 
 
 ### Other Servers
 
-Servers that do not go through `application.run()`, like gunicorn or `flask run`, register the application themselves:
+Under gunicorn, the [gunicorn hooks](#gunicorn) register the application, and the extension adds the health route right before the first request.
+
+Other servers that do not go through `application.run()`, like uWSGI, Waitress or `flask run`, register the application themselves:
 
 ```python
-# loaded by every gunicorn worker
 consul_extension = ConsulExtension(application, name="my-service")
 consul_extension.register(port=int(os.environ["PORT"]))
 ```
 
 > [!TIP]
-> Every worker registering the same instance is harmless: the instance ID is the service name.
+> Every process registering the same instance is harmless: the instance ID is the service name.
 
-`consul_extension.deregister()` is available to a server with a shutdown event of its own, such as gunicorn's `on_exit` hook.
+`consul_extension.deregister()` is available to a server with a shutdown event of its own.
 
 ### Options
 
@@ -454,7 +465,7 @@ uvicorn.run(application, host="0.0.0.0", port=8000)
 The lifespan registers the application at startup, before the first request, and deregisters it at shutdown. It uses the asynchronous client, and works with any Starlette application.
 
 > [!IMPORTANT]
-> The `port` must match the one given to the server: uvicorn and the other ASGI servers do not tell it to the application.
+> The `port` must match the one given to the server: uvicorn and the other ASGI servers do not tell it to the application. Under gunicorn, [the hooks](#gunicorn) find it themselves.
 
 ### With a Lifespan of your Own
 
@@ -487,7 +498,8 @@ Registering last and deregistering first, as above, keeps the instance out of Co
 ### Reload and Workers
 
 - `uvicorn --reload` restarts the application on every change: each restart is a shutdown then a startup, so the instance is deregistered then registered again.
-- With several workers (`uvicorn --workers 4`, or gunicorn with uvicorn workers), every worker registers the same instance, which is harmless, and deregisters it when it stops.
+- With `uvicorn --workers 4`, every worker registers the same instance, which is harmless, and deregisters it when it stops: a worker restarting removes the instance until it registers again.
+- Under gunicorn, the [gunicorn hooks](#gunicorn) register the application once, from the main process: the lifespan leaves the registration to them, so workers restarting do not touch Consul.
 
 ### Options
 
@@ -505,3 +517,64 @@ ConsulLifespan(
     log_health_checks=False,  # True keeps them in the access logs
 )
 ```
+
+## gunicorn
+
+### Setup
+
+gunicorn calls the hooks of its configuration file. The ones of `consulwire.integrations.gunicorn` register the application from gunicorn's main process, whatever its framework:
+
+```python
+# gunicorn.conf.py
+from consulwire.integrations.gunicorn import ConsulHooks
+
+bind = "0.0.0.0:8000"
+workers = 4
+
+consul_hooks = ConsulHooks(name="my-service")
+
+when_ready = consul_hooks.when_ready
+on_exit = consul_hooks.on_exit
+```
+
+- `when_ready` runs once gunicorn listens, before the workers start: it registers the application with the port gunicorn is bound to, found automatically.
+- `on_exit` deregisters it when gunicorn stops.
+
+With hooks of your own, call these from yours, like `consul_hooks.when_ready(server)`.
+
+> [!NOTE]
+> The application must answer the health route: the Flask and FastAPI integrations add it when it is missing. With another framework, declare it.
+
+### Workers
+
+Only the main process registers, so workers restarting, after a crash, with `--max-requests` or with `--reload`, do not touch Consul.
+
+The integrations running in the workers leave the registration to the hooks, and still add the health route and hide the health checks:
+
+- FastAPI: `ConsulLifespan` neither registers nor deregisters;
+- Flask: `ConsulExtension` adds the health route right before the first request.
+
+The hooks tell them through the `CONSULWIRE_REGISTERED_BY` environment variable, set before the workers start.
+
+### Binary Upgrades
+
+During a binary upgrade (`kill -USR2`), the new main process registers the same instance: the old one exits without deregistering it.
+
+### Options
+
+```python
+ConsulHooks(
+    name="my-service",  # name other services look this one up by
+    port=None,  # port other services connect to, the first TCP port gunicorn listens on by default
+    health_path="/health",  # route Consul checks, answered by the application
+    address=None,  # see The Address
+    consul=None,  # Consul client, from the environment by default
+    check_interval=timedelta(seconds=10),  # time between two health checks
+    deregister_critical_after=timedelta(minutes=1),  # None keeps dead instances
+    tags=(),
+    meta=None,
+    log_health_checks=False,  # True keeps them in the access logs
+)
+```
+
+When gunicorn only listens on a UNIX socket, like behind nginx, give the `port` and `address` other services reach it at: otherwise the registration is skipped with a warning.

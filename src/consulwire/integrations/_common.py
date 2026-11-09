@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -21,6 +22,16 @@ DEFAULT_HEALTH_PATH: Final = "/health"
 DEFAULT_CHECK_INTERVAL: Final = timedelta(seconds=10)
 
 DEFAULT_DEREGISTER_CRITICAL_AFTER: Final = timedelta(minutes=1)
+
+REGISTERED_BY_VARIABLE: Final = "CONSULWIRE_REGISTERED_BY"
+"""Set by a server that registers the application from its main process, like the gunicorn hooks,
+before it starts the workers: the integrations running in the workers leave the registration to it.
+"""
+
+
+def registering_server() -> str | None:
+    """Return the server registering the application from its main process, if any."""
+    return os.environ.get(REGISTERED_BY_VARIABLE) or None
 
 
 def resolve_address(given: str | None, listening_host: str | None, agent_url: str) -> str:

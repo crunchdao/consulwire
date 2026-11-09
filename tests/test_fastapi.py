@@ -354,3 +354,26 @@ async def test_health_checks_can_stay_in_the_access_logs(agent: FakeAgent) -> No
         isinstance(item, HealthCheckLogFilter)
         for item in logging.getLogger("uvicorn.access").filters
     )
+
+
+async def test_the_registration_is_left_to_gunicorn(
+    monkeypatch: pytest.MonkeyPatch,
+    agent: FakeAgent,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+    monkeypatch.setenv("CONSULWIRE_REGISTERED_BY", "gunicorn")
+    application = Starlette(
+        lifespan=ConsulLifespan(name="my-service", port=8000, consul=agent.async_consul()),
+    )
+
+    async with application.router.lifespan_context(application):
+        response = await get(application, "/health")
+
+    assert response.status_code == 200
+    assert agent.requests == []
+    assert "consul registration left to gunicorn - name=my-service" in caplog.text
+    assert any(
+        isinstance(item, HealthCheckLogFilter)
+        for item in logging.getLogger("uvicorn.access").filters
+    )

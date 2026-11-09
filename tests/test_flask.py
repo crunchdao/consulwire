@@ -670,3 +670,27 @@ def test_health_checks_can_stay_in_the_access_logs() -> None:
     _ = ConsulExtension(flask.Flask(__name__), name="my-service", log_health_checks=True)
 
     assert health_log_filters("werkzeug") == []
+
+
+def test_other_servers_get_the_health_route_at_the_first_request() -> None:
+    application = flask.Flask(__name__)
+    _ = ConsulExtension(application, name="my-service")
+
+    @application.get("/hello")
+    def hello() -> str:
+        return "hello"
+
+    assert "/health" not in [rule.rule for rule in application.url_map.iter_rules()]
+
+    with application.test_client() as client:
+        assert client.get("/hello").get_data() == b"hello"
+        assert client.get("/health").status_code == 200
+
+
+def test_other_servers_keep_the_application_health_route() -> None:
+    application = flask.Flask(__name__)
+    _ = ConsulExtension(application, name="my-service")
+    application.add_url_rule("/health", view_func=lambda: "database is fine")
+
+    with application.test_client() as client:
+        assert client.get("/health").get_data() == b"database is fine"

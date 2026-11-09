@@ -5,11 +5,11 @@ build-backend = "hatchling.build"
 [project]
 name = "consulwire"
 dynamic = ["version"]
-description = "Strictly typed sync/async Consul client, with Flask and FastAPI integrations that register the application."
+description = "Strictly typed sync/async Consul client, with Flask, FastAPI and gunicorn integrations that register the application."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Enzo Caceres", email = "enzo.caceres@crunchdao.com" }]
-keywords = ["consul", "service-discovery", "service-registry", "key-value", "flask", "fastapi", "starlette"]
+keywords = ["consul", "service-discovery", "service-registry", "key-value", "flask", "fastapi", "starlette", "gunicorn"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Framework :: FastAPI",
@@ -79,7 +79,13 @@ branch = true
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-exclude_also = ["if TYPE_CHECKING:", "@overload", "raise AssertionError", "assert_never\\("]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "@overload",
+    "raise AssertionError",
+    "assert_never\\(",
+    "class .*\\(Protocol\\):",
+]
 
 # --------------------------------------------------------------------------- mypy
 

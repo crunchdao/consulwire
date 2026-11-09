@@ -1,4 +1,4 @@
-"""Strictly typed Consul client, with integrations that register Flask and FastAPI applications.
+"""Strictly typed Consul client, with integrations registering Flask, FastAPI and gunicorn servers.
 
 Example:
     ```python

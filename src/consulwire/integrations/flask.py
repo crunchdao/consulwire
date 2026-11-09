@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import TYPE_CHECKING, Final, cast
 
 import flask
@@ -33,8 +34,10 @@ from consulwire.integrations._common import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from datetime import timedelta
+
+    from _typeshed.wsgi import StartResponse, WSGIEnvironment
 
 __all__ = ["ConsulExtension"]
 
@@ -57,7 +60,8 @@ class ConsulExtension:
       host are the ones ``run`` uses, and the address is found automatically when the host is a
       wildcard like ``0.0.0.0``. With the reloader, only the process serving requests registers;
     - gives Consul a health route: the application's own ``GET`` route at ``health_path`` when it
-      has one, otherwise one answering 200, added right before the registration;
+      has one, otherwise one answering 200, added right before the registration, or before the
+      first request under another server;
     - hides the health check requests from the werkzeug and gunicorn access logs, unless
       ``log_health_checks`` is set.
 
@@ -66,8 +70,9 @@ class ConsulExtension:
     replaces it, its ID being the service name.
 
     Registration is skipped, with a log line, when no agent is configured: no ``consul`` given, and
-    neither ``CONSUL_HTTP_ADDR`` nor ``CONSUL_HOST`` set. Servers that do not go through
-    ``application.run()``, like gunicorn, call :meth:`register` themselves.
+    neither ``CONSUL_HTTP_ADDR`` nor ``CONSUL_HOST`` set. Under gunicorn,
+    :class:`consulwire.integrations.gunicorn.ConsulHooks` registers the application. Other servers
+    that do not go through ``application.run()`` call :meth:`register` themselves.
     """
 
     name: str
@@ -120,6 +125,8 @@ class ConsulExtension:
 
         self._application: flask.Flask | None = None
         self._registered: bool = False
+        self._health_route_lock: threading.Lock = threading.Lock()
+        self._health_route_ready: bool = False
 
         if application is not None:
             self.init_app(application)
@@ -161,6 +168,7 @@ class ConsulExtension:
             hide_health_checks(ACCESS_LOGGERS, self.health_path)
 
         self._wrap_run(application)
+        self._wrap_wsgi_app(application)
 
         application.extensions[EXTENSION_NAME] = self
         self._application = application
@@ -280,6 +288,27 @@ class ConsulExtension:
         # applications in the same process stay apart. Flask calls `run` only from user code.
         run_registered.__doc__ = run.__doc__
         application.run = run_registered  # type: ignore[method-assign]
+
+    def _wrap_wsgi_app(self, application: flask.Flask) -> None:
+        """Add the health route before the first request, for servers calling the application.
+
+        Replaced on the instance like any WSGI middleware. Flask refuses new routes once a request
+        was handled, and every route of the application is declared by then.
+        """
+        wsgi_app = application.wsgi_app
+
+        def wsgi_app_with_health_route(
+            environ: WSGIEnvironment,
+            start_response: StartResponse,
+        ) -> Iterable[bytes]:
+            if not self._health_route_ready:
+                with self._health_route_lock:
+                    _ensure_health_route(application, self.health_path)
+                    self._health_route_ready = True
+
+            return wsgi_app(environ, start_response)
+
+        application.wsgi_app = wsgi_app_with_health_route  # type: ignore[method-assign]
 
     def _register_before_run(  # noqa: PLR0913  # the arguments of Flask.run
         self,
