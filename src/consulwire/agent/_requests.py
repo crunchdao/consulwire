@@ -25,6 +25,35 @@ def register_service(  # noqa: PLR0913  # the fields of a Consul service
     checks: Sequence[Check],
     replace_existing_checks: bool,
 ) -> Request:
+    """Register a service instance, with Consul's field names. Unset fields are left out.
+
+    Request:
+        ```http
+        PUT /v1/agent/service/register?replace-existing-checks=true
+
+        {
+            "Name": "my-service",
+            "ID": "my-service",
+            "Address": "10.0.0.5",
+            "Port": 8000,
+            "Tags": ["internal"],
+            "Meta": {"version": "1.2.0"},
+            "Checks": [
+                {
+                    "HTTP": "http://10.0.0.5:8000/health",
+                    "Interval": "10s",
+                    "DeregisterCriticalServiceAfter": "60s"
+                },
+                {"TCP": "10.0.0.5:8000", "Interval": "30s", "Timeout": "1500ms"}
+            ]
+        }
+        ```
+
+    Response, without body; ``400`` with the reason in plain text for an invalid service:
+        ```http
+        200 OK
+        ```
+    """
     payload: Payload = {"Name": name}
 
     if service_id is not None:
@@ -54,6 +83,18 @@ def register_service(  # noqa: PLR0913  # the fields of a Consul service
 
 
 def deregister_service(service_id: str) -> Request:
+    """Remove a service instance and its checks.
+
+    Request:
+        ```http
+        PUT /v1/agent/service/deregister/my-service
+        ```
+
+    Response, without body; ``404`` for an unknown ID:
+        ```http
+        200 OK
+        ```
+    """
     return Request("PUT", f"/v1/agent/service/deregister/{quote(service_id, safe='')}")
 
 
