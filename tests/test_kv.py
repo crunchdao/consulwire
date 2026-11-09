@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import base64
 import json
+import queue
+import threading
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
+import anyio
 import httpx
 import pytest
 
@@ -11,7 +15,13 @@ from consulwire import HTTPStatusError, ResponseError
 from consulwire._transport import Request
 from consulwire.kv import Entry
 from consulwire.kv._requests import BlockingQuery, parse_entry
+from consulwire.testing import InMemoryAgent
 from tests.support import FakeAgent
+
+if TYPE_CHECKING:
+    from consulwire import Consul
+
+WATCH_WAIT = timedelta(seconds=5)
 
 
 def entry_payload(key: str = "my-service/flag", value: bytes | None = b"on") -> dict[str, object]:
@@ -28,6 +38,16 @@ def entry_payload(key: str = "my-service/flag", value: bytes | None = b"on") -> 
 
 def answering(body: object, *, index: int = 12) -> FakeAgent:
     return FakeAgent(body=json.dumps(body), headers={"X-Consul-Index": str(index)})
+
+
+@pytest.fixture
+def agent() -> InMemoryAgent:
+    return InMemoryAgent()
+
+
+@pytest.fixture
+def consul(agent: InMemoryAgent) -> Consul:
+    return agent.consul()
 
 
 # --------------------------------------------------------------------------- the requests
@@ -261,6 +281,156 @@ def test_a_blocking_query_starts_over_when_the_index_goes_backwards() -> None:
     _ = query.request()
 
     assert sent_indexes == [12, 0, 1]
+
+
+# --------------------------------------------------------------------------- the behavior
+
+
+def test_put_then_get(consul: Consul) -> None:
+    assert consul.kv.get("my-service/flag") is None
+
+    assert consul.kv.put("my-service/flag", "on") is True
+
+    assert consul.kv.get("my-service/flag") == b"on"
+
+
+def test_check_and_set(consul: Consul) -> None:
+    assert consul.kv.put("my-service/counter", "1", cas=0) is True
+    assert consul.kv.put("my-service/counter", "1", cas=0) is False
+
+    entry = consul.kv.get_entry("my-service/counter")
+    assert entry is not None
+
+    assert consul.kv.put("my-service/counter", "2", cas=entry.modify_index) is True
+    assert consul.kv.put("my-service/counter", "3", cas=entry.modify_index) is False
+    assert consul.kv.get("my-service/counter") == b"2"
+
+    updated = consul.kv.get_entry("my-service/counter")
+    assert updated is not None
+    assert updated.create_index == entry.create_index
+
+    assert consul.kv.delete("my-service/counter", cas=entry.modify_index) is False
+    assert consul.kv.delete("my-service/counter", cas=updated.modify_index) is True
+    assert consul.kv.get("my-service/counter") is None
+
+
+def test_listing(consul: Consul) -> None:
+    for key in (
+        "my-service/database/url",
+        "my-service/database/user",
+        "my-service/flag",
+        "other-service/flag",
+    ):
+        _ = consul.kv.put(key, key)
+
+    assert [entry.key for entry in consul.kv.entries("my-service/")] == [
+        "my-service/database/url",
+        "my-service/database/user",
+        "my-service/flag",
+    ]
+    assert consul.kv.keys("my-service/", separator="/") == [
+        "my-service/database/",
+        "my-service/flag",
+    ]
+    assert consul.kv.keys("other-") == ["other-service/flag"]
+    assert consul.kv.keys("missing/") == []
+
+    consul.kv.delete_prefix("my-service/")
+
+    assert consul.kv.keys() == ["other-service/flag"]
+
+
+def test_watch_yields_the_value_then_each_change(agent: InMemoryAgent, consul: Consul) -> None:
+    seen: queue.Queue[bytes | None] = queue.Queue()
+
+    def watch() -> None:
+        for entry in agent.consul().kv.watch("my-service/flag", wait=WATCH_WAIT):
+            seen.put(None if entry is None else entry.value)
+
+            if entry is not None and entry.value == b"off":
+                return
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+
+    assert seen.get(timeout=5) is None
+
+    _ = consul.kv.put("other-service/flag", "unrelated")
+    _ = consul.kv.put("my-service/flag", "on")
+    assert seen.get(timeout=5) == b"on"
+
+    _ = consul.kv.delete("my-service/flag")
+    assert seen.get(timeout=5) is None
+
+    _ = consul.kv.put("my-service/flag", "off")
+    assert seen.get(timeout=5) == b"off"
+
+    watcher.join(5)
+    assert seen.empty()
+
+
+def test_watch_entries_yields_the_whole_prefix(agent: InMemoryAgent, consul: Consul) -> None:
+    _ = consul.kv.put("my-service/a", "1")
+    watch = agent.consul().kv.watch_entries("my-service/", wait=WATCH_WAIT)
+
+    first = next(watch)
+    _ = consul.kv.put("my-service/b", "2")
+    second = next(watch)
+
+    assert [entry.key for entry in first] == ["my-service/a"]
+    assert [entry.key for entry in second] == ["my-service/a", "my-service/b"]
+
+
+@pytest.mark.anyio
+async def test_the_async_client(agent: InMemoryAgent) -> None:
+    async with agent.async_consul() as consul:
+        assert await consul.kv.put("my-service/flag", "on") is True
+        assert await consul.kv.get("my-service/flag") == b"on"
+        assert await consul.kv.get("missing") is None
+        assert [entry.key for entry in await consul.kv.entries()] == ["my-service/flag"]
+        assert await consul.kv.keys() == ["my-service/flag"]
+        assert await consul.kv.delete("my-service/flag") is True
+
+        _ = await consul.kv.put("my-service/a", "1")
+        await consul.kv.delete_prefix("my-service/")
+        assert agent.kv == {}
+
+
+@pytest.mark.anyio
+async def test_async_watches(agent: InMemoryAgent) -> None:
+    async with agent.async_consul() as consul:
+        values: list[bytes | None] = []
+        listings: list[list[str]] = []
+        watching = anyio.Event()
+        listing = anyio.Event()
+
+        async def watch() -> None:
+            async for entry in consul.kv.watch("my-service/flag", wait=WATCH_WAIT):
+                values.append(None if entry is None else entry.value)
+                watching.set()
+
+                if entry is not None:
+                    return
+
+        async def watch_entries() -> None:
+            async for entries in consul.kv.watch_entries("my-service/", wait=WATCH_WAIT):
+                listings.append([entry.key for entry in entries])
+                listing.set()
+
+                if entries:
+                    return
+
+        with anyio.fail_after(5):
+            async with anyio.create_task_group() as group:
+                _ = group.start_soon(watch)
+                _ = group.start_soon(watch_entries)
+
+                await watching.wait()
+                await listing.wait()
+                _ = await consul.kv.put("my-service/flag", "on")
+
+        assert values == [None, b"on"]
+        assert listings == [[], ["my-service/flag"]]
 
 
 def test_printing_an_entry_never_shows_its_value() -> None:

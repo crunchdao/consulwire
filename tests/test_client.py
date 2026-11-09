@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from consulwire import AsyncConsul, ConfigurationError, Consul, HTTPStatusError, TransportError
-from consulwire._duration import format_duration
+from consulwire._duration import format_duration, parse_duration
 from consulwire._environment import find_token, find_url
 from tests.support import FakeAgent
 
@@ -255,3 +255,22 @@ def test_format_duration(duration: timedelta, formatted: str) -> None:
 def test_format_duration_refuses_negative_durations() -> None:
     with pytest.raises(ValueError, match="must not be negative"):
         _ = format_duration(timedelta(seconds=-1))
+
+
+@pytest.mark.parametrize(
+    ("duration", "parsed"),
+    [
+        ("300s", timedelta(seconds=300)),
+        ("1500ms", timedelta(milliseconds=1500)),
+        ("250us", timedelta(microseconds=250)),
+        ("1h30m", timedelta(minutes=90)),
+    ],
+)
+def test_parse_duration(duration: str, parsed: timedelta) -> None:
+    assert parse_duration(duration) == parsed
+
+
+@pytest.mark.parametrize("duration", ["", "10", "1d", "1s and more"])
+def test_parse_duration_refuses_other_text(duration: str) -> None:
+    with pytest.raises(ValueError, match="not a duration"):
+        _ = parse_duration(duration)

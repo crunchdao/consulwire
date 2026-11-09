@@ -17,6 +17,7 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 		- [Watch Changes](#watch-changes)
 	- [Asynchronous Client](#asynchronous-client)
 	- [Errors](#errors)
+	- [Testing](#testing)
 - [Integrations](#integrations)
 	- [What Every Integration Does](#what-every-integration-does)
 		- [The Address](#the-address)
@@ -44,7 +45,7 @@ pip install "consulwire[flask]"
 pip install "consulwire[fastapi]"
 ```
 
-Python 3.10 or newer is required. The client only depends on `httpx`.
+Python 3.10 or newer is required. The client depends on `httpx` and `anyio`.
 
 # Client
 
@@ -268,6 +269,32 @@ except HTTPStatusError as error:
 except ConsulError as error:
     print("Consul is unavailable: %s" % error)
 ```
+
+## Testing
+
+`consulwire.testing.InMemoryAgent` answers both clients from memory, the way an agent would: service registration, and the key/value store with check-and-set and blocking queries. An application and its integration are tested without Consul:
+
+```python
+from consulwire.testing import InMemoryAgent
+
+agent = InMemoryAgent()
+lifespan = ConsulLifespan(name="my-service", port=8000, consul=agent.async_consul())
+
+with TestClient(FastAPI(lifespan=lifespan)):
+    assert agent.services["my-service"]["Port"] == 8000
+
+assert agent.services == {}  # deregistered at shutdown
+```
+
+| Member                                         | Meaning                                                                        |
+| ---------------------------------------------- | ------------------------------------------------------------------------------ |
+| `agent.consul()`, `agent.async_consul()`       | Clients of the agent.                                                          |
+| `agent.transport()`, `agent.async_transport()` | Its HTTP transports, for a client the application creates: `Consul(transport=agent.transport())`. |
+| `agent.services`                               | Registered services by instance ID, with Consul's field names: `Name`, `Port`, `Checks`. |
+| `agent.kv`                                     | A copy of the key/value store.                                                 |
+| `agent.requests`                               | Every request received, as `httpx.Request`.                                    |
+
+Other endpoints answer `404`.
 
 # Integrations
 
