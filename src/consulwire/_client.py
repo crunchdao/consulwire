@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Final
 from consulwire._environment import DEFAULT_URL, find_token, find_url
 from consulwire._transport import AsyncTransport, Transport
 from consulwire.agent import Agent, AsyncAgent
+from consulwire.kv import KV, AsyncKV
 
 if TYPE_CHECKING:
     from types import TracebackType
@@ -33,6 +34,9 @@ class Consul:
 
     agent: Agent
     """Services and health checks of this machine."""
+
+    kv: KV
+    """Key/value store."""
 
     def __init__(
         self,
@@ -64,6 +68,7 @@ class Consul:
         )
 
         self.agent = Agent(self._transport)
+        self.kv = KV(self._transport)
 
     def close(self) -> None:
         """Close the connections to the agent."""
@@ -97,6 +102,9 @@ class AsyncConsul:
     agent: AsyncAgent
     """Services and health checks of this machine."""
 
+    kv: AsyncKV
+    """Key/value store."""
+
     def __init__(
         self,
         url: str | None = None,
@@ -119,6 +127,7 @@ class AsyncConsul:
         )
 
         self.agent = AsyncAgent(self._transport)
+        self.kv = AsyncKV(self._transport)
 
     async def close(self) -> None:
         """Close the connections to the agent."""

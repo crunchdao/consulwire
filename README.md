@@ -10,6 +10,11 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 		- [Register a Service](#register-a-service)
 		- [Health Checks](#health-checks)
 		- [Deregister a Service](#deregister-a-service)
+	- [Key/Value Store](#keyvalue-store)
+		- [Read and Write](#read-and-write)
+		- [Check-and-Set](#check-and-set)
+		- [List Keys](#list-keys)
+		- [Watch Changes](#watch-changes)
 	- [Asynchronous Client](#asynchronous-client)
 	- [Errors](#errors)
 - [Integrations](#integrations)
@@ -73,7 +78,7 @@ The environment variables of the official tools are read first, then the ones of
 
 ## Usage
 
-The client is organized like the [agent HTTP API](https://developer.hashicorp.com/consul/api-docs/agent): each section of the API is an attribute of the client, such as `consul.agent`.
+The client is organized like the [Consul HTTP API](https://developer.hashicorp.com/consul/api-docs): each section of the API is an attribute of the client, `consul.agent` for the services of this machine and `consul.kv` for the [key/value store](#keyvalue-store).
 
 ### Register a Service
 
@@ -152,6 +157,81 @@ consul.agent.deregister_service("my-service")
 > The argument is the instance ID, which is the service name unless another `service_id` was registered. <br />
 > An unknown ID raises `HTTPStatusError` with the status `404`.
 
+## Key/Value Store
+
+`consul.kv` reads and writes [Consul's key/value store](https://developer.hashicorp.com/consul/api-docs/kv). Values are raw bytes: the application decides their format, whether text, JSON or YAML.
+
+### Read and Write
+
+```python
+consul.kv.put("my-service/feature-flag", "on")  # text is stored in UTF-8
+
+flag = consul.kv.get("my-service/feature-flag")  # b"on", or None when the key does not exist
+enabled = flag == b"on"
+
+consul.kv.delete("my-service/feature-flag")  # deleting a missing key succeeds
+consul.kv.delete_prefix("my-service/")  # every key starting with the prefix
+```
+
+`get_entry` returns the key with its metadata, as an `Entry`:
+
+| Attribute      | Meaning                                                              |
+| -------------- | -------------------------------------------------------------------- |
+| `key`          | Full key.                                                            |
+| `value`        | Raw value, `b""` when the key holds none.                            |
+| `flags`        | Number the application attached with `put(..., flags=)`, `0` by default. |
+| `modify_index` | Index of the last write, for [check-and-set](#check-and-set).        |
+| `create_index` | Index of the write that created the key.                             |
+| `lock_index`   | Number of times a session acquired the key.                          |
+| `session`      | Session holding the lock on the key, if any.                         |
+
+> [!NOTE]
+> Consul refuses values over 512 KB with a `413`, raised as `HTTPStatusError`. <br />
+> `delete_prefix("")` raises a `ValueError` instead of deleting the whole store.
+
+### Check-and-Set
+
+With `cas`, a write only happens when the key did not change since it was read, so two writers cannot overwrite each other:
+
+```python
+entry = consul.kv.get_entry("my-service/counter")
+count = int(entry.value)
+
+if not consul.kv.put("my-service/counter", str(count + 1), cas=entry.modify_index):
+    ...  # another writer was first: read the key again and retry
+```
+
+`cas=0` writes only when the key does not exist yet. `delete` takes `cas` too. Both return `False` when the check failed.
+
+### List Keys
+
+```python
+consul.kv.entries("my-service/")  # every entry starting with the prefix, sorted by key
+consul.kv.keys("my-service/")  # only their names
+
+# one level, like a folder listing: ["my-service/database/", "my-service/feature-flag"]
+consul.kv.keys("my-service/", separator="/")
+```
+
+A prefix without any key gives an empty list. Without a prefix, the whole store is listed.
+
+### Watch Changes
+
+`watch` yields a key now, then every time it changes, and `None` while it does not exist. It relies on Consul's [blocking queries](https://developer.hashicorp.com/consul/api-docs/features/blocking): a request stays open until the key changes, so a change arrives within milliseconds, without polling.
+
+```python
+for entry in consul.kv.watch("my-service/feature-flag"):
+    enabled = entry is not None and entry.value == b"on"
+```
+
+`watch_entries("my-service/")` yields every entry starting with a prefix the same way, whenever one of them is created, written or deleted.
+
+> [!IMPORTANT]
+> The loop never ends by itself: run it in a thread of its own, or as a task with the asynchronous client (`async for entry in consul.kv.watch(...)`). <br />
+> It stops at the first error, such as the agent restarting: whether to retry, and how long to wait first, is the application's choice.
+
+Each request is held up to `wait`, 5 minutes by default and 10 at most, and the client waits that long on top of its timeout.
+
 ## Asynchronous Client
 
 `AsyncConsul` has the same API, with coroutines:
@@ -173,7 +253,8 @@ Every error raised by the package derives from `ConsulError`:
 ConsulError
 ├── ConfigurationError   an environment variable holds an invalid value (also a ValueError)
 ├── TransportError       the agent could not be reached: connection refused, timeout, DNS failure
-└── HTTPStatusError      the agent answered with an error status (.status_code, .body)
+├── HTTPStatusError      the agent answered with an error status (.status_code, .body)
+└── ResponseError        the agent answered a body without the shape of its API
 ```
 
 ```python

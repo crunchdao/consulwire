@@ -15,10 +15,16 @@ AGENT_URL = "http://consul:8500"
 class FakeAgent:
     """In-memory Consul agent: answers every request with the same response, records them all."""
 
-    def __init__(self, status_code: int = 200, body: str = "") -> None:
+    def __init__(
+        self,
+        status_code: int = 200,
+        body: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.requests: list[httpx.Request] = []
         self.status_code: int = status_code
         self.body: str = body
+        self.headers: dict[str, str] = headers or {}
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -38,4 +44,4 @@ class FakeAgent:
     def _handle(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
 
-        return httpx.Response(self.status_code, text=self.body)
+        return httpx.Response(self.status_code, text=self.body, headers=self.headers)

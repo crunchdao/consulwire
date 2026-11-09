@@ -13,6 +13,8 @@ Example:
             port=8000,
             checks=[{"http": "http://my-service:8000/health", "interval": timedelta(seconds=10)}],
         )
+
+        flag = consul.kv.get("my-service/feature-flag")
     ```
 """
 
@@ -20,7 +22,13 @@ from __future__ import annotations
 
 from consulwire._client import AsyncConsul, Consul
 from consulwire._version import __version__
-from consulwire.errors import ConfigurationError, ConsulError, HTTPStatusError, TransportError
+from consulwire.errors import (
+    ConfigurationError,
+    ConsulError,
+    HTTPStatusError,
+    ResponseError,
+    TransportError,
+)
 
 __all__ = [
     "AsyncConsul",
@@ -28,6 +36,7 @@ __all__ = [
     "Consul",
     "ConsulError",
     "HTTPStatusError",
+    "ResponseError",
     "TransportError",
     "__version__",
 ]

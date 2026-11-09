@@ -9,7 +9,7 @@ description = "Strictly typed sync/async Consul client, with Flask and FastAPI i
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Enzo Caceres", email = "enzo.caceres@crunchdao.com" }]
-keywords = ["consul", "service-discovery", "service-registry", "flask", "fastapi", "starlette"]
+keywords = ["consul", "service-discovery", "service-registry", "key-value", "flask", "fastapi", "starlette"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Framework :: FastAPI",

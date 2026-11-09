@@ -6,8 +6,8 @@ import httpx
 import pytest
 
 from consulwire import AsyncConsul, ConfigurationError, Consul, HTTPStatusError, TransportError
+from consulwire._duration import format_duration
 from consulwire._environment import find_token, find_url
-from consulwire.agent._requests import format_duration
 from tests.support import FakeAgent
 
 

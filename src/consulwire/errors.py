@@ -15,6 +15,10 @@ class TransportError(ConsulError):
     """The agent could not be reached: connection refused, timeout, DNS failure."""
 
 
+class ResponseError(ConsulError):
+    """The agent answered with a body that does not have the shape of its API."""
+
+
 class HTTPStatusError(ConsulError):
     """The agent answered with an error status.
 
