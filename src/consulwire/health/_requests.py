@@ -28,7 +28,7 @@ def service(
 
     Request:
         ```http
-        GET /v1/health/service/scoring-service?passing=true&tag=internal&index=42&wait=300s
+        GET /v1/health/service/web?passing=true&tag=internal&index=42&wait=300s
         ```
 
     Response, empty for an unknown service. ``Service.Address`` is empty when the instance
@@ -41,8 +41,8 @@ def service(
             {
                 "Node": {"Node": "node-1", "Address": "10.0.0.2"},
                 "Service": {
-                    "ID": "scoring-service",
-                    "Service": "scoring-service",
+                    "ID": "web",
+                    "Service": "web",
                     "Address": "10.0.0.5",
                     "Port": 8005,
                     "Tags": ["internal"],
@@ -50,7 +50,7 @@ def service(
                 },
                 "Checks": [
                     {"CheckID": "serfHealth", "Status": "passing"},
-                    {"CheckID": "service:scoring-service", "Status": "passing"}
+                    {"CheckID": "service:web", "Status": "passing"}
                 ]
             }
         ]

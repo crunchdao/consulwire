@@ -16,15 +16,15 @@ def test_register_service_sends_the_service_with_consul_names() -> None:
 
     with agent.consul() as consul:
         consul.agent.register_service(
-            "aml-review-service",
-            service_id="aml-review-service-1",
-            address="aml-review-service",
+            "my-service",
+            service_id="my-service-1",
+            address="my-service",
             port=8000,
             tags=["internal"],
             meta={"version": "1"},
             checks=[
                 {
-                    "http": "http://aml-review-service:8000/health",
+                    "http": "http://my-service:8000/health",
                     "interval": timedelta(seconds=10),
                     "timeout": timedelta(milliseconds=1500),
                     "method": "HEAD",
@@ -34,7 +34,7 @@ def test_register_service_sends_the_service_with_consul_names() -> None:
                     "id": "health",
                     "name": "HTTP health",
                 },
-                {"tcp": "aml-review-service:8000", "interval": timedelta(seconds=30)},
+                {"tcp": "my-service:8000", "interval": timedelta(seconds=30)},
             ],
         )
 
@@ -42,15 +42,15 @@ def test_register_service_sends_the_service_with_consul_names() -> None:
     assert request.method == "PUT"
     assert str(request.url) == "http://consul:8500/v1/agent/service/register"
     assert agent.sent_json() == {
-        "Name": "aml-review-service",
-        "ID": "aml-review-service-1",
-        "Address": "aml-review-service",
+        "Name": "my-service",
+        "ID": "my-service-1",
+        "Address": "my-service",
         "Port": 8000,
         "Tags": ["internal"],
         "Meta": {"version": "1"},
         "Checks": [
             {
-                "HTTP": "http://aml-review-service:8000/health",
+                "HTTP": "http://my-service:8000/health",
                 "Method": "HEAD",
                 "Header": {"Accept": ["text/plain"]},
                 "TLSSkipVerify": True,
@@ -60,7 +60,7 @@ def test_register_service_sends_the_service_with_consul_names() -> None:
                 "CheckID": "health",
                 "Name": "HTTP health",
             },
-            {"TCP": "aml-review-service:8000", "Interval": "30s"},
+            {"TCP": "my-service:8000", "Interval": "30s"},
         ],
     }
 
@@ -85,11 +85,11 @@ def test_register_service_can_replace_existing_checks() -> None:
 def test_deregister_service_escapes_the_service_id() -> None:
     agent = FakeAgent()
 
-    agent.consul().agent.deregister_service("aml review/1")
+    agent.consul().agent.deregister_service("my service/1")
 
     request = agent.requests[0]
     assert request.method == "PUT"
-    assert request.url.raw_path == b"/v1/agent/service/deregister/aml%20review%2F1"
+    assert request.url.raw_path == b"/v1/agent/service/deregister/my%20service%2F1"
     assert request.content == b""
 
 

@@ -65,7 +65,7 @@ class Health:
 
         Example:
             ```python
-            for instances in consul.health.watch_service("scoring-service"):
+            for instances in consul.health.watch_service("web"):
                 targets = instances
             ```
 

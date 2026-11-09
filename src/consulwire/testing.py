@@ -16,7 +16,7 @@ Example:
     Instances pass their checks until told otherwise, to test how a caller handles a failing one:
 
     ```python
-    agent.set_passing("scoring-service-1", passing=False)
+    agent.set_passing("web-1", passing=False)
     ```
 
     An instance with a TTL check starts critical, like in Consul, until it reports with

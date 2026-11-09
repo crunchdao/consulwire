@@ -74,7 +74,7 @@ with Consul() as consul:
 consul = Consul("http://consul:8500", token="a0b1c2d3e4f5g6h7i8j9", timeout=5.0)
 ```
 
-The environment variables of the official tools are read first, then the ones of Spring Cloud Consul, so a Python service is configured like its Java neighbors:
+The environment variables of the official tools are read first, then the ones of Spring Cloud Consul, so a Python service is configured like the Spring Cloud Consul applications next to it:
 
 | Variable            | Meaning                                                      |
 | ------------------- | ------------------------------------------------------------ |
@@ -284,10 +284,10 @@ Each request is held up to `wait`, 5 minutes by default and 10 at most, and the 
 `consul.health.service` returns the instances of a service that pass every check: the ones to call.
 
 ```python
-instances = consul.health.service("scoring-service")
+instances = consul.health.service("web")
 instance = instances[0]
 
-instance.url("/score")  # "http://10.0.0.5:8005/score"
+instance.url("/orders")  # "http://10.0.0.5:8005/orders"
 ```
 
 | Attribute | Meaning                                                                               |
@@ -305,7 +305,7 @@ instance.url("/score")  # "http://10.0.0.5:8005/score"
 `watch_service` follows them through blocking queries, like the [key/value watches](#watch-changes): it yields the instances now, then every time one starts, stops, or fails its checks.
 
 ```python
-for instances in consul.health.watch_service("scoring-service"):
+for instances in consul.health.watch_service("web"):
     ...
 ```
 
@@ -317,8 +317,8 @@ for instances in consul.health.watch_service("scoring-service"):
 `consul.catalog` lists what is registered, healthy or not:
 
 ```python
-consul.catalog.services()  # {"consul": [], "scoring-service": ["internal"]}
-consul.catalog.service("scoring-service")  # every instance, failing ones included
+consul.catalog.services()  # {"consul": [], "web": ["internal"]}
+consul.catalog.service("web")  # every instance, failing ones included
 ```
 
 ### Call Another Service
@@ -378,22 +378,22 @@ Create it once, next to the client, and pick an instance for each call. An insta
 import httpx
 
 consul = Consul()
-scoring = RoundRobin(consul, "scoring-service")
+web = RoundRobin(consul, "web")
 
 
-def score(body: dict) -> dict:
+def create_order(body: dict) -> dict:
     for _ in range(3):
-        instance = scoring.pick()
+        instance = web.pick()
 
         try:
-            response = httpx.post(instance.url("/score"), json=body, timeout=60)
+            response = httpx.post(instance.url("/orders"), json=body, timeout=60)
         except httpx.TransportError:
             continue  # unreachable: the next instance
 
         response.raise_for_status()
         return response.json()
 
-    raise RuntimeError("no instance of scoring-service answered")
+    raise RuntimeError("no instance of web answered")
 ```
 
 > [!TIP]

@@ -35,7 +35,7 @@ class ServiceInstance:
     node: str
 
     def url(self, path: str = "", *, scheme: str = "http") -> str:
-        """Return the URL of a path on this instance, like ``http://10.0.0.5:8000/score``.
+        """Return the URL of a path on this instance, like ``http://10.0.0.5:8000/orders``.
 
         IPv6 addresses are put in brackets.
         """

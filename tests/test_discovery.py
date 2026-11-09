@@ -16,9 +16,9 @@ from tests.support import WATCH_WAIT, answering
 if TYPE_CHECKING:
     from consulwire import Consul
 
-SCORING = ServiceInstance(
-    id="scoring-service-1",
-    name="scoring-service",
+WEB = ServiceInstance(
+    id="web-1",
+    name="web",
     address="10.0.0.5",
     port=8005,
     tags=("internal",),
@@ -31,8 +31,8 @@ def catalog_entry(**overrides: object) -> dict[str, object]:
     return {
         "Node": "node-1",
         "Address": "10.0.0.2",
-        "ServiceID": "scoring-service-1",
-        "ServiceName": "scoring-service",
+        "ServiceID": "web-1",
+        "ServiceName": "web",
         "ServiceAddress": "10.0.0.5",
         "ServicePort": 8005,
         "ServiceTags": ["internal"],
@@ -45,8 +45,8 @@ def health_entry(**service_overrides: object) -> dict[str, object]:
     return {
         "Node": {"Node": "node-1", "Address": "10.0.0.2"},
         "Service": {
-            "ID": "scoring-service-1",
-            "Service": "scoring-service",
+            "ID": "web-1",
+            "Service": "web",
             "Address": "10.0.0.5",
             "Port": 8005,
             "Tags": ["internal"],
@@ -62,7 +62,7 @@ def health_entry(**service_overrides: object) -> dict[str, object]:
 
 @pytest.mark.parametrize(
     ("address", "url"),
-    [("10.0.0.5", "http://10.0.0.5:8005/score"), ("fd00::5", "http://[fd00::5]:8005/score")],
+    [("10.0.0.5", "http://10.0.0.5:8005/orders"), ("fd00::5", "http://[fd00::5]:8005/orders")],
     ids=["IPv4", "IPv6"],
 )
 def test_the_url_of_an_instance(address: str, url: str) -> None:
@@ -70,12 +70,12 @@ def test_the_url_of_an_instance(address: str, url: str) -> None:
         id="a", name="a", address=address, port=8005, tags=(), meta={}, node="n"
     )
 
-    assert instance.url("/score") == url
+    assert instance.url("/orders") == url
     assert instance.url(scheme="https").startswith("https://")
 
 
 def test_instances_are_hashable() -> None:
-    assert len({SCORING, SCORING}) == 1
+    assert len({WEB, WEB}) == 1
 
 
 # --------------------------------------------------------------------------- the catalog
@@ -91,16 +91,16 @@ def test_catalog_services_are_sorted_with_their_tags() -> None:
 def test_catalog_service_reads_every_field() -> None:
     agent = answering([catalog_entry()])
 
-    instances = agent.consul().catalog.service("scoring service", tag="internal")
+    instances = agent.consul().catalog.service("web service", tag="internal")
 
-    assert instances == [SCORING]
-    assert agent.requests[0].url.raw_path == b"/v1/catalog/service/scoring%20service?tag=internal"
+    assert instances == [WEB]
+    assert agent.requests[0].url.raw_path == b"/v1/catalog/service/web%20service?tag=internal"
 
 
 def test_catalog_service_falls_back_to_the_node_address() -> None:
     agent = answering([catalog_entry(ServiceAddress="", ServiceTags=None, ServiceMeta=None)])
 
-    [instance] = agent.consul().catalog.service("scoring-service")
+    [instance] = agent.consul().catalog.service("web")
 
     assert (instance.address, instance.tags, instance.meta) == ("10.0.0.2", (), {})
     assert agent.requests[0].url.query == b""
@@ -112,17 +112,17 @@ def test_catalog_service_falls_back_to_the_node_address() -> None:
 def test_health_service_asks_for_the_healthy_instances() -> None:
     agent = answering([health_entry()])
 
-    instances = agent.consul().health.service("scoring-service", tag="internal")
+    instances = agent.consul().health.service("web", tag="internal")
 
-    assert instances == [SCORING]
-    assert agent.calls() == [("GET", "/v1/health/service/scoring-service")]
+    assert instances == [WEB]
+    assert agent.calls() == [("GET", "/v1/health/service/web")]
     assert dict(agent.requests[0].url.params) == {"passing": "true", "tag": "internal"}
 
 
 def test_health_service_can_list_every_instance() -> None:
     agent = answering([health_entry(Address="")])
 
-    [instance] = agent.consul().health.service("scoring-service", healthy_only=False)
+    [instance] = agent.consul().health.service("web", healthy_only=False)
 
     assert instance.address == "10.0.0.2"
     assert agent.requests[0].url.query == b""
@@ -131,9 +131,9 @@ def test_health_service_can_list_every_instance() -> None:
 def test_a_watch_is_a_blocking_query() -> None:
     agent = answering([health_entry()])
 
-    instances = next(agent.consul().health.watch_service("scoring-service", wait=WATCH_WAIT))
+    instances = next(agent.consul().health.watch_service("web", wait=WATCH_WAIT))
 
-    assert instances == [SCORING]
+    assert instances == [WEB]
     assert dict(agent.requests[0].url.params) == {"passing": "true", "index": "0", "wait": "5s"}
 
 
@@ -167,12 +167,9 @@ def test_a_watch_is_a_blocking_query() -> None:
 )
 def test_malformed_catalog_instances_are_response_errors(body: object, problem: str) -> None:
     with pytest.raises(ResponseError) as raised:
-        _ = answering(body).consul().catalog.service("scoring-service")
+        _ = answering(body).consul().catalog.service("web")
 
-    assert (
-        str(raised.value)
-        == f"consul answered GET /v1/catalog/service/scoring-service with {problem}"
-    )
+    assert str(raised.value) == f"consul answered GET /v1/catalog/service/web with {problem}"
 
 
 @pytest.mark.parametrize(
@@ -192,7 +189,7 @@ def test_nested_fields_are_named_with_their_parent() -> None:
     body = [health_entry(Port="8005")]
 
     with pytest.raises(ResponseError, match=r"with `Service\.Port` that is not a number"):
-        _ = answering(body).consul().health.service("scoring-service")
+        _ = answering(body).consul().health.service("web")
 
 
 def test_a_health_entry_without_its_service_is_a_response_error() -> None:
@@ -200,7 +197,7 @@ def test_a_health_entry_without_its_service_is_a_response_error() -> None:
     del entry["Service"]
 
     with pytest.raises(ResponseError, match="with `Service` that is not an object"):
-        _ = answering([entry]).consul().health.service("scoring-service")
+        _ = answering([entry]).consul().health.service("web")
 
 
 # --------------------------------------------------------------------------- the in-memory agent
@@ -214,49 +211,49 @@ def agent() -> InMemoryAgent:
 @pytest.fixture
 def consul(agent: InMemoryAgent) -> Consul:
     consul = agent.consul()
-    consul.agent.register_service("scoring-service", service_id="scoring-1", port=8005, tags=["a"])
+    consul.agent.register_service("web", service_id="web-1", port=8005, tags=["a"])
     consul.agent.register_service(
-        "scoring-service", service_id="scoring-2", address="10.0.0.6", port=8005, tags=["b"]
+        "web", service_id="web-2", address="10.0.0.6", port=8005, tags=["b"]
     )
-    consul.agent.register_service("notebook-processor-service", port=8004)
+    consul.agent.register_service("api", port=8004)
 
     return consul
 
 
 def test_the_in_memory_catalog(consul: Consul) -> None:
     assert consul.catalog.services() == {
-        "notebook-processor-service": [],
-        "scoring-service": ["a", "b"],
+        "api": [],
+        "web": ["a", "b"],
     }
-    assert [instance.address for instance in consul.catalog.service("scoring-service")] == [
+    assert [instance.address for instance in consul.catalog.service("web")] == [
         NODE_ADDRESS,
         "10.0.0.6",
     ]
-    assert [instance.id for instance in consul.catalog.service("scoring-service", tag="b")] == [
-        "scoring-2",
+    assert [instance.id for instance in consul.catalog.service("web", tag="b")] == [
+        "web-2",
     ]
     assert consul.catalog.service("missing") == []
 
 
 def test_the_in_memory_health(agent: InMemoryAgent, consul: Consul) -> None:
-    agent.set_passing("scoring-1", passing=False)
+    agent.set_passing("web-1", passing=False)
 
-    assert [instance.id for instance in consul.health.service("scoring-service")] == ["scoring-2"]
-    assert len(consul.health.service("scoring-service", healthy_only=False)) == 2
-    assert len(consul.catalog.service("scoring-service")) == 2
-    assert consul.health.service("scoring-service")[0].node == NODE
+    assert [instance.id for instance in consul.health.service("web")] == ["web-2"]
+    assert len(consul.health.service("web", healthy_only=False)) == 2
+    assert len(consul.catalog.service("web")) == 2
+    assert consul.health.service("web")[0].node == NODE
 
-    agent.set_passing("scoring-1", passing=True)
+    agent.set_passing("web-1", passing=True)
 
-    assert len(consul.health.service("scoring-service")) == 2
+    assert len(consul.health.service("web")) == 2
 
 
 def test_registering_again_passes_again(agent: InMemoryAgent, consul: Consul) -> None:
-    agent.set_passing("scoring-1", passing=False)
+    agent.set_passing("web-1", passing=False)
 
-    consul.agent.register_service("scoring-service", service_id="scoring-1", port=8005)
+    consul.agent.register_service("web", service_id="web-1", port=8005)
 
-    assert len(consul.health.service("scoring-service")) == 2
+    assert len(consul.health.service("web")) == 2
 
 
 def test_an_unknown_instance_cannot_fail(agent: InMemoryAgent) -> None:
@@ -268,7 +265,7 @@ def test_a_watch_follows_the_instances(agent: InMemoryAgent, consul: Consul) -> 
     seen: queue.Queue[list[str]] = queue.Queue()
 
     def watch() -> None:
-        for instances in agent.consul().health.watch_service("scoring-service", wait=WATCH_WAIT):
+        for instances in agent.consul().health.watch_service("web", wait=WATCH_WAIT):
             seen.put([instance.id for instance in instances])
 
             if not instances:
@@ -277,13 +274,13 @@ def test_a_watch_follows_the_instances(agent: InMemoryAgent, consul: Consul) -> 
     watcher = threading.Thread(target=watch)
     watcher.start()
 
-    assert seen.get(timeout=5) == ["scoring-1", "scoring-2"]
+    assert seen.get(timeout=5) == ["web-1", "web-2"]
 
-    agent.set_passing("scoring-1", passing=False)
-    assert seen.get(timeout=5) == ["scoring-2"]
+    agent.set_passing("web-1", passing=False)
+    assert seen.get(timeout=5) == ["web-2"]
 
-    consul.agent.register_service("notebook-processor-service", port=8004)  # another service
-    consul.agent.deregister_service("scoring-2")
+    consul.agent.register_service("api", port=8004)  # another service
+    consul.agent.deregister_service("web-2")
     assert seen.get(timeout=5) == []
 
     watcher.join(5)
@@ -293,19 +290,17 @@ def test_a_watch_follows_the_instances(agent: InMemoryAgent, consul: Consul) -> 
 @pytest.mark.anyio
 async def test_the_async_sections(agent: InMemoryAgent) -> None:
     async with agent.async_consul() as consul:
-        await consul.agent.register_service("scoring-service", port=8005)
+        await consul.agent.register_service("web", port=8005)
 
-        assert await consul.catalog.services() == {"scoring-service": []}
-        assert [instance.port for instance in await consul.catalog.service("scoring-service")] == [
-            8005
-        ]
-        assert len(await consul.health.service("scoring-service")) == 1
+        assert await consul.catalog.services() == {"web": []}
+        assert [instance.port for instance in await consul.catalog.service("web")] == [8005]
+        assert len(await consul.health.service("web")) == 1
 
         seen: list[int] = []
         watching = anyio.Event()
 
         async def watch() -> None:
-            async for instances in consul.health.watch_service("scoring-service", wait=WATCH_WAIT):
+            async for instances in consul.health.watch_service("web", wait=WATCH_WAIT):
                 seen.append(len(instances))
                 watching.set()
 
@@ -317,14 +312,14 @@ async def test_the_async_sections(agent: InMemoryAgent) -> None:
                 _ = group.start_soon(watch)
 
                 await watching.wait()
-                agent.set_passing("scoring-service", passing=False)
+                agent.set_passing("web", passing=False)
 
         assert seen == [1, 0]
 
 
 def test_a_watch_skips_the_unchanged_answers(agent: InMemoryAgent, consul: Consul) -> None:
-    watch = consul.health.watch_service("scoring-service", wait=timedelta(milliseconds=10))
-    failing = threading.Timer(0.1, lambda: agent.set_passing("scoring-1", passing=False))
+    watch = consul.health.watch_service("web", wait=timedelta(milliseconds=10))
+    failing = threading.Timer(0.1, lambda: agent.set_passing("web-1", passing=False))
 
     assert len(next(watch)) == 2
 
@@ -332,21 +327,21 @@ def test_a_watch_skips_the_unchanged_answers(agent: InMemoryAgent, consul: Consu
     instances = next(watch)
     failing.join()
 
-    assert [instance.id for instance in instances] == ["scoring-2"]
+    assert [instance.id for instance in instances] == ["web-2"]
     assert len(agent.requests) > 6  # unchanged answers came in between
 
 
 @pytest.mark.anyio
 async def test_an_async_watch_skips_the_unchanged_answers(agent: InMemoryAgent) -> None:
     async with agent.async_consul() as consul:
-        await consul.agent.register_service("scoring-service", port=8005)
-        watch = consul.health.watch_service("scoring-service", wait=timedelta(milliseconds=10))
+        await consul.agent.register_service("web", port=8005)
+        watch = consul.health.watch_service("web", wait=timedelta(milliseconds=10))
 
         assert len(await anext(watch)) == 1
 
         async def fail() -> None:
             await anyio.sleep(0.1)
-            agent.set_passing("scoring-service", passing=False)
+            agent.set_passing("web", passing=False)
 
         instances: list[ServiceInstance] | None = None
 

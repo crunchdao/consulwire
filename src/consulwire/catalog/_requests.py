@@ -26,7 +26,7 @@ def services() -> Request:
         200 OK
         X-Consul-Index: 42
 
-        {"consul": [], "scoring-service": ["internal"], "notebook-processor-service": []}
+        {"consul": [], "web": ["internal"], "api": []}
         ```
     """
     return Request("GET", "/v1/catalog/services")
@@ -37,7 +37,7 @@ def service(name: str, *, tag: str | None) -> Request:
 
     Request:
         ```http
-        GET /v1/catalog/service/scoring-service?tag=internal
+        GET /v1/catalog/service/web?tag=internal
         ```
 
     Response, empty for an unknown service. ``Address`` is the node's, ``ServiceAddress`` the
@@ -50,8 +50,8 @@ def service(name: str, *, tag: str | None) -> Request:
             {
                 "Node": "node-1",
                 "Address": "10.0.0.2",
-                "ServiceID": "scoring-service",
-                "ServiceName": "scoring-service",
+                "ServiceID": "web",
+                "ServiceName": "web",
                 "ServiceAddress": "10.0.0.5",
                 "ServicePort": 8005,
                 "ServiceTags": ["internal"],
