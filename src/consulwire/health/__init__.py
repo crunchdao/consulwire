@@ -31,22 +31,22 @@ class Health:
         name: str,
         *,
         tag: str | None = None,
-        passing: bool = True,
+        healthy_only: bool = True,
     ) -> list[ServiceInstance]:
         """Return the instances of a service that pass every check, the ones to call.
 
         Args:
             name: Service name. An unknown one has no instance.
             tag: Only the instances with this tag.
-            passing: Only the instances whose checks all pass. ``False`` returns every instance,
-                like the catalog. A check in warning does not pass.
+            healthy_only: Only the instances whose checks all pass. ``False`` returns every
+                instance, like the catalog. A check in warning does not pass.
 
         Raises:
             TransportError: The agent could not be reached.
             HTTPStatusError: The agent refused the request, like 403 for a missing ACL permission.
             ResponseError: The agent answered something else than instances.
         """
-        request = _requests.service(name, tag=tag, passing=passing)
+        request = _requests.service(name, tag=tag, healthy_only=healthy_only)
 
         return _requests.parse_instances(self._transport.send(request))
 
@@ -55,7 +55,7 @@ class Health:
         name: str,
         *,
         tag: str | None = None,
-        passing: bool = True,
+        healthy_only: bool = True,
         wait: timedelta = DEFAULT_WAIT,
     ) -> Iterator[list[ServiceInstance]]:
         """Yield the instances now, then every time one starts, stops, or fails its checks.
@@ -72,7 +72,7 @@ class Health:
         Args:
             name: Service name.
             tag: Only the instances with this tag.
-            passing: Only the instances whose checks all pass.
+            healthy_only: Only the instances whose checks all pass.
             wait: Longest time the agent holds a request, at most 10 minutes.
 
         Raises:
@@ -84,7 +84,7 @@ class Health:
             self._transport,
             BlockingQuery(
                 lambda index: _requests.service(
-                    name, tag=tag, passing=passing, index=index, wait=wait
+                    name, tag=tag, healthy_only=healthy_only, index=index, wait=wait
                 ),
                 _requests.parse_instances,
             ),
@@ -102,10 +102,10 @@ class AsyncHealth:
         name: str,
         *,
         tag: str | None = None,
-        passing: bool = True,
+        healthy_only: bool = True,
     ) -> list[ServiceInstance]:
         """See :meth:`Health.service`."""
-        request = _requests.service(name, tag=tag, passing=passing)
+        request = _requests.service(name, tag=tag, healthy_only=healthy_only)
 
         return _requests.parse_instances(await self._transport.send(request))
 
@@ -114,7 +114,7 @@ class AsyncHealth:
         name: str,
         *,
         tag: str | None = None,
-        passing: bool = True,
+        healthy_only: bool = True,
         wait: timedelta = DEFAULT_WAIT,
     ) -> AsyncIterator[list[ServiceInstance]]:
         """See :meth:`Health.watch_service`, with ``async for``."""
@@ -122,7 +122,7 @@ class AsyncHealth:
             self._transport,
             BlockingQuery(
                 lambda index: _requests.service(
-                    name, tag=tag, passing=passing, index=index, wait=wait
+                    name, tag=tag, healthy_only=healthy_only, index=index, wait=wait
                 ),
                 _requests.parse_instances,
             ),

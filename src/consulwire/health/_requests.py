@@ -20,7 +20,7 @@ def service(
     name: str,
     *,
     tag: str | None,
-    passing: bool,
+    healthy_only: bool,
     index: int = 0,
     wait: timedelta | None = None,
 ) -> Request:
@@ -58,7 +58,7 @@ def service(
     """
     parameters: dict[str, str] = {}
 
-    if passing:
+    if healthy_only:
         parameters["passing"] = "true"
 
     if tag is not None:

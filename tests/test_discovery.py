@@ -109,7 +109,7 @@ def test_catalog_service_falls_back_to_the_node_address() -> None:
 # --------------------------------------------------------------------------- the health
 
 
-def test_health_service_asks_for_the_passing_instances() -> None:
+def test_health_service_asks_for_the_healthy_instances() -> None:
     agent = answering([health_entry()])
 
     instances = agent.consul().health.service("scoring-service", tag="internal")
@@ -122,7 +122,7 @@ def test_health_service_asks_for_the_passing_instances() -> None:
 def test_health_service_can_list_every_instance() -> None:
     agent = answering([health_entry(Address="")])
 
-    [instance] = agent.consul().health.service("scoring-service", passing=False)
+    [instance] = agent.consul().health.service("scoring-service", healthy_only=False)
 
     assert instance.address == "10.0.0.2"
     assert agent.requests[0].url.query == b""
@@ -242,7 +242,7 @@ def test_the_in_memory_health(agent: InMemoryAgent, consul: Consul) -> None:
     agent.set_passing("scoring-1", passing=False)
 
     assert [instance.id for instance in consul.health.service("scoring-service")] == ["scoring-2"]
-    assert len(consul.health.service("scoring-service", passing=False)) == 2
+    assert len(consul.health.service("scoring-service", healthy_only=False)) == 2
     assert len(consul.catalog.service("scoring-service")) == 2
     assert consul.health.service("scoring-service")[0].node == NODE
 

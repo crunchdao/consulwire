@@ -282,7 +282,7 @@ for instances in consul.health.watch_service("scoring-service"):
 ```
 
 > [!NOTE]
-> An instance in warning, like one answering `429 Too Many Requests` to its health check, does not pass. `passing=False` returns every instance with its health unknown.
+> An instance in warning, like one answering `429 Too Many Requests` to its health check, does not pass. `healthy_only=False` returns every instance, failing ones included.
 
 ### Every Instance
 
