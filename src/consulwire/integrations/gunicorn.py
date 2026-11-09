@@ -20,14 +20,12 @@ import os
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 from consulwire._client import Consul
-from consulwire._environment import find_url
-from consulwire.errors import ConsulError
 from consulwire.integrations._common import (
     DEFAULT_CHECK_INTERVAL,
     DEFAULT_DEREGISTER_CRITICAL_AFTER,
     DEFAULT_HEALTH_PATH,
     REGISTERED_BY_VARIABLE,
-    health_check,
+    Registration,
     hide_health_checks,
     resolve_address,
 )
@@ -123,13 +121,19 @@ class ConsulHooks:
         self._port: int | None = port
         self._address: str | None = address
         self._given_consul: Consul | None = consul
-        self._check_interval: timedelta = check_interval
-        self._deregister_critical_after: timedelta | None = deregister_critical_after
-        self._tags: Sequence[str] = tags
-        self._meta: Mapping[str, str] = meta or {}
         self._log_health_checks: bool = log_health_checks
+        self._registration: Registration = Registration(
+            name=name,
+            health_path=health_path,
+            check_interval=check_interval,
+            deregister_critical_after=deregister_critical_after,
+            tags=tags,
+            meta=meta or {},
+            logger=logger,
+        )
 
         self._consul: Consul | None = None
+        self._owned: bool = False
 
     def when_ready(self, server: Arbiter) -> None:
         """Register the application. gunicorn calls it once the sockets are bound.
@@ -141,9 +145,8 @@ class ConsulHooks:
         if not self._log_health_checks:
             hide_health_checks(ACCESS_LOGGERS, self.health_path)
 
-        consul = self._agent_client()
+        consul, owned = self._registration.agent_client(self._given_consul, Consul)
         if consul is None:
-            logger.info("consul registration skipped, no agent configured - name=%s", self.name)
             return
 
         registered = False
@@ -152,8 +155,8 @@ class ConsulHooks:
             registered = self._register(consul, server)
         finally:
             if registered:
-                self._consul = consul
-            elif consul is not self._given_consul:
+                self._consul, self._owned = consul, owned
+            elif owned:
                 consul.close()
 
     def _register(self, consul: Consul, server: Arbiter) -> bool:
@@ -167,34 +170,9 @@ class ConsulHooks:
             return False
 
         address = resolve_address(self._address, listening_host, consul.url)
-
-        consul.agent.register_service(
-            self.name,
-            service_id=self.name,
-            address=address,
-            port=port,
-            tags=self._tags,
-            meta=self._meta,
-            checks=[
-                health_check(
-                    address,
-                    port,
-                    self.health_path,
-                    interval=self._check_interval,
-                    deregister_critical_after=self._deregister_critical_after,
-                ),
-            ],
-        )
+        self._registration.register(consul, address, port)
 
         os.environ[REGISTERED_BY_VARIABLE] = "gunicorn"
-
-        logger.info(
-            "registered in consul - name=%s address=%s port=%d agent=%s",
-            self.name,
-            address,
-            port,
-            consul.url,
-        )
 
         return True
 
@@ -206,33 +184,15 @@ class ConsulHooks:
 
         self._consul = None
 
-        try:
-            # During a binary upgrade (USR2), the new main process registered the same instance:
-            # the old one exiting leaves it.
-            if server.reexec_pid:
-                logger.info(
-                    "consul deregistration left to the new main process - name=%s", self.name
-                )
-                return
-
-            consul.agent.deregister_service(self.name)
-        except ConsulError as error:
-            logger.warning("consul deregistration failed - name=%s error=`%s`", self.name, error)
+        # During a binary upgrade (USR2), the new main process registered the same instance: the
+        # old one exiting leaves it.
+        if server.reexec_pid:
+            logger.info("consul deregistration left to the new main process - name=%s", self.name)
         else:
-            logger.info("deregistered from consul - name=%s", self.name)
-        finally:
-            if consul is not self._given_consul:
-                consul.close()
+            self._registration.deregister(consul)
 
-    def _agent_client(self) -> Consul | None:
-        if self._given_consul is not None:
-            return self._given_consul
-
-        url = find_url()
-        if url is None:
-            return None
-
-        return Consul(url)
+        if self._owned:
+            consul.close()
 
 
 def _tcp_listener(server: Arbiter) -> tuple[str | None, int | None]:

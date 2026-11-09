@@ -1,21 +1,27 @@
-"""What every integration shares: the health check, the address, and the quiet access log."""
+"""What every integration shares: the registration, the address, and the quiet access log."""
 
 from __future__ import annotations
 
 import ipaddress
 import logging
 import os
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, TypeVar
 
 from typing_extensions import override
 
-from consulwire._network import find_local_address
+from consulwire._environment import find_url
+from consulwire._network import find_local_address, url_host
+from consulwire.errors import ConsulError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
+    from consulwire._client import AsyncConsul, Consul
     from consulwire.agent import HTTPCheck
+
+_Client = TypeVar("_Client")
 
 DEFAULT_HEALTH_PATH: Final = "/health"
 
@@ -62,21 +68,112 @@ def specific_address(host: str | None) -> str | None:
     return host
 
 
-def health_check(
-    address: str,
-    port: int,
-    health_path: str,
-    *,
-    interval: timedelta,
-    deregister_critical_after: timedelta | None,
-) -> HTTPCheck:
-    host = f"[{address}]" if ":" in address else address
-    check: HTTPCheck = {"http": f"http://{host}:{port}{health_path}", "interval": interval}
+@dataclass(frozen=True)
+class Registration:
+    """What an integration registers, but the address and port, known once the server listens.
 
-    if deregister_critical_after is not None:
-        check["deregister_critical_after"] = deregister_critical_after
+    The instance ID is the service name, so registering again replaces the instance. Logs go to the
+    logger of the integration.
+    """
 
-    return check
+    name: str
+    health_path: str
+    check_interval: timedelta
+    deregister_critical_after: timedelta | None
+    tags: Sequence[str]
+    meta: Mapping[str, str]
+    logger: logging.Logger
+
+    def agent_client(
+        self,
+        given: _Client | None,
+        create: Callable[[str], _Client],
+    ) -> tuple[_Client | None, bool]:
+        """Return the client to register with, and whether the integration owns it.
+
+        The given client first, otherwise one created from the environment. ``None``, with a log
+        line, when no agent is configured.
+        """
+        if given is not None:
+            return given, False
+
+        url = find_url()
+        if url is None:
+            self.logger.info(
+                "consul registration skipped, no agent configured - name=%s", self.name
+            )
+            return None, False
+
+        return create(url), True
+
+    def register(self, consul: Consul, address: str, port: int) -> None:
+        """Register the instance. Errors are raised: the application fails to start."""
+        consul.agent.register_service(
+            self.name,
+            service_id=self.name,
+            address=address,
+            port=port,
+            tags=self.tags,
+            meta=self.meta,
+            checks=[self._health_check(address, port)],
+        )
+
+        self._registered(address, port, consul.url)
+
+    async def register_async(self, consul: AsyncConsul, address: str, port: int) -> None:
+        """See :meth:`register`."""
+        await consul.agent.register_service(
+            self.name,
+            service_id=self.name,
+            address=address,
+            port=port,
+            tags=self.tags,
+            meta=self.meta,
+            checks=[self._health_check(address, port)],
+        )
+
+        self._registered(address, port, consul.url)
+
+    def deregister(self, consul: Consul) -> None:
+        """Deregister the instance. Errors are logged: Consul removes the instance later anyway."""
+        try:
+            consul.agent.deregister_service(self.name)
+        except ConsulError as error:
+            self._deregistration_failed(error)
+        else:
+            self.logger.info("deregistered from consul - name=%s", self.name)
+
+    async def deregister_async(self, consul: AsyncConsul) -> None:
+        """See :meth:`deregister`."""
+        try:
+            await consul.agent.deregister_service(self.name)
+        except ConsulError as error:
+            self._deregistration_failed(error)
+        else:
+            self.logger.info("deregistered from consul - name=%s", self.name)
+
+    def _health_check(self, address: str, port: int) -> HTTPCheck:
+        check: HTTPCheck = {
+            "http": f"http://{url_host(address)}:{port}{self.health_path}",
+            "interval": self.check_interval,
+        }
+
+        if self.deregister_critical_after is not None:
+            check["deregister_critical_after"] = self.deregister_critical_after
+
+        return check
+
+    def _registered(self, address: str, port: int, agent_url: str) -> None:
+        self.logger.info(
+            "registered in consul - name=%s address=%s port=%d agent=%s",
+            self.name,
+            address,
+            port,
+            agent_url,
+        )
+
+    def _deregistration_failed(self, error: ConsulError) -> None:
+        self.logger.warning("consul deregistration failed - name=%s error=`%s`", self.name, error)
 
 
 class HealthCheckLogFilter(logging.Filter):

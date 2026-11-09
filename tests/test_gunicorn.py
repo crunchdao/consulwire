@@ -8,7 +8,6 @@ import pytest
 from typing_extensions import override
 
 from consulwire import Consul, ConsulError
-from consulwire.integrations import _common
 from consulwire.integrations import gunicorn as consul_gunicorn
 from consulwire.integrations._common import HealthCheckLogFilter
 from consulwire.integrations.gunicorn import ConsulHooks
@@ -16,7 +15,7 @@ from consulwire.testing import InMemoryAgent
 from tests.support import FakeAgent
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from tests.conftest import LocalAddressLookups
 
 
 class FakeListener:
@@ -35,32 +34,6 @@ class FakeArbiter:
         self.reexec_pid: int = reexec_pid
 
 
-@pytest.fixture(autouse=True)
-def restore_access_log_filters() -> Iterator[None]:
-    loggers = [logging.getLogger(name) for name in consul_gunicorn.ACCESS_LOGGERS]
-    filters = [list(access_logger.filters) for access_logger in loggers]
-
-    yield
-
-    for access_logger, previous in zip(loggers, filters, strict=True):
-        access_logger.filters = previous
-
-
-@pytest.fixture(autouse=True)
-def local_address(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Make the local address 10.0.0.5, and record the agent URLs it was asked for."""
-    agent_urls: list[str] = []
-
-    def find_local_address(agent_url: str) -> str:
-        agent_urls.append(agent_url)
-
-        return "10.0.0.5"
-
-    monkeypatch.setattr(_common, "find_local_address", find_local_address)
-
-    return agent_urls
-
-
 @pytest.fixture
 def agent() -> InMemoryAgent:
     return InMemoryAgent()
@@ -68,7 +41,7 @@ def agent() -> InMemoryAgent:
 
 def test_registers_once_ready_and_deregisters_at_exit(
     agent: InMemoryAgent,
-    local_address: list[str],
+    local_address: LocalAddressLookups,
 ) -> None:
     hooks = ConsulHooks(name="my-service", consul=agent.consul(), tags=["internal"])
     server = FakeArbiter(("0.0.0.0", 8000))
@@ -91,7 +64,7 @@ def test_registers_once_ready_and_deregisters_at_exit(
             ],
         },
     }
-    assert local_address == ["http://127.0.0.1:8500"]
+    assert local_address.agent_urls == ["http://127.0.0.1:8500"]
     assert os.environ["CONSULWIRE_REGISTERED_BY"] == "gunicorn"
 
     hooks.on_exit(server)

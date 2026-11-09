@@ -554,7 +554,7 @@ consul_extension.register(port=int(os.environ["PORT"]))
 > [!TIP]
 > Every process registering the same instance is harmless: the instance ID is the service name.
 
-`consul_extension.deregister()` is available to a server with a shutdown event of its own.
+`consul_extension.deregister()` is available to an application with a shutdown event of its own. Like every integration at shutdown, it logs its errors instead of raising them.
 
 ### Options
 

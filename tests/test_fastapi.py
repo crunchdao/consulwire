@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -13,53 +12,19 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
 from consulwire import AsyncConsul, ConsulError
-from consulwire.integrations import _common
 from consulwire.integrations import fastapi as consul_fastapi
 from consulwire.integrations._common import HealthCheckLogFilter
 from consulwire.integrations.fastapi import ConsulLifespan
 from tests.support import FakeAgent
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterator
+    from collections.abc import AsyncGenerator
 
     from starlette.requests import Request
 
+    from tests.conftest import LocalAddressLookups
+
 pytestmark = pytest.mark.anyio
-
-
-@pytest.fixture(autouse=True)
-def restore_access_log_filters() -> Iterator[None]:
-    loggers = [logging.getLogger(name) for name in consul_fastapi.ACCESS_LOGGERS]
-    filters = [list(access_logger.filters) for access_logger in loggers]
-
-    yield
-
-    for access_logger, previous in zip(loggers, filters, strict=True):
-        access_logger.filters = previous
-
-
-class LocalAddressLookups:
-    """Agent URLs the local address was asked for, and whether each lookup ran on the loop."""
-
-    def __init__(self) -> None:
-        self.agent_urls: list[str] = []
-        self.on_the_event_loop: list[bool] = []
-
-
-@pytest.fixture(autouse=True)
-def local_address(monkeypatch: pytest.MonkeyPatch) -> LocalAddressLookups:
-    """Make the local address 10.0.0.5, and record how it was looked up."""
-    lookups = LocalAddressLookups()
-
-    def find_local_address(agent_url: str) -> str:
-        lookups.agent_urls.append(agent_url)
-        lookups.on_the_event_loop.append(threading.current_thread() is threading.main_thread())
-
-        return "10.0.0.5"
-
-    monkeypatch.setattr(_common, "find_local_address", find_local_address)
-
-    return lookups
 
 
 @pytest.fixture

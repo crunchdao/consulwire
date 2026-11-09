@@ -23,14 +23,14 @@ from werkzeug.exceptions import HTTPException
 from werkzeug.serving import is_running_from_reloader
 
 from consulwire._client import Consul
-from consulwire._environment import find_url
 from consulwire.integrations._common import (
     DEFAULT_CHECK_INTERVAL,
     DEFAULT_DEREGISTER_CRITICAL_AFTER,
     DEFAULT_HEALTH_PATH,
-    health_check,
+    Registration,
     hide_health_checks,
     resolve_address,
+    specific_address,
 )
 
 if TYPE_CHECKING:
@@ -117,11 +117,16 @@ class ConsulExtension:
 
         self._address: str | None = address
         self._consul: Consul | None = consul
-        self._check_interval: timedelta = check_interval
-        self._deregister_critical_after: timedelta | None = deregister_critical_after
-        self._tags: Sequence[str] = tags
-        self._meta: Mapping[str, str] = meta or {}
         self._log_health_checks: bool = log_health_checks
+        self._registration: Registration = Registration(
+            name=name,
+            health_path=health_path,
+            check_interval=check_interval,
+            deregister_critical_after=deregister_critical_after,
+            tags=tags,
+            meta=meta or {},
+            logger=logger,
+        )
 
         self._application: flask.Flask | None = None
         self._registered: bool = False
@@ -193,56 +198,26 @@ class ConsulExtension:
         application = self._set_up_application()
         _ensure_health_route(application, self.health_path)
 
-        consul = self._agent_client()
-        if consul is None:
-            logger.info("consul registration skipped, no agent configured - name=%s", self.name)
+        self._consul, _ = self._registration.agent_client(self._consul, Consul)
+        if self._consul is None:
             return False
 
-        address = resolve_address(address or self._address, None, consul.url)
-
-        consul.agent.register_service(
-            self.name,
-            service_id=self.name,
-            address=address,
-            port=port,
-            tags=self._tags,
-            meta=self._meta,
-            checks=[
-                health_check(
-                    address,
-                    port,
-                    self.health_path,
-                    interval=self._check_interval,
-                    deregister_critical_after=self._deregister_critical_after,
-                ),
-            ],
-        )
-
+        address = resolve_address(address or self._address, None, self._consul.url)
+        self._registration.register(self._consul, address, port)
         self._registered = True
-
-        logger.info(
-            "registered in consul - name=%s address=%s port=%d agent=%s",
-            self.name,
-            address,
-            port,
-            consul.url,
-        )
 
         return True
 
     def deregister(self) -> None:
-        """Deregister the application, if registered. Errors are raised.
+        """Deregister the application, if registered. Errors are logged, not raised.
 
-        Nothing calls it: Flask has no shutdown event. A server with one, like gunicorn's
-        ``on_exit`` hook, can.
+        Nothing calls it: Flask has no shutdown event. Applications with one of their own can.
         """
         if self._consul is None or not self._registered:
             return
 
-        self._consul.agent.deregister_service(self.name)
+        self._registration.deregister(self._consul)
         self._registered = False
-
-        logger.info("deregistered from consul - name=%s", self.name)
 
     def _set_up_application(self) -> flask.Flask:
         if self._application is None:
@@ -250,16 +225,6 @@ class ConsulExtension:
             raise RuntimeError(message)
 
         return self._application
-
-    def _agent_client(self) -> Consul | None:
-        if self._consul is None:
-            url = find_url()
-            if url is None:
-                return None
-
-            self._consul = Consul(url)
-
-        return self._consul
 
     def _wrap_run(self, application: flask.Flask) -> None:
         run = application.run
@@ -342,10 +307,7 @@ class ConsulExtension:
             )
             return
 
-        consul = self._agent_client()
-        address = (
-            None if consul is None else resolve_address(self._address, listening_host, consul.url)
-        )
+        address = self._address or specific_address(listening_host)
 
         _ = self.register(port=listening_port, address=address)
 

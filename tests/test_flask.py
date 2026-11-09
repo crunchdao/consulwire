@@ -11,14 +11,13 @@ import pytest
 import werkzeug.serving
 
 from consulwire import Consul, ConsulError
-from consulwire.integrations import _common
 from consulwire.integrations import flask as consul_flask
 from consulwire.integrations._common import HealthCheckLogFilter
 from consulwire.integrations.flask import ConsulExtension
 from tests.support import FakeAgent
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from tests.conftest import LocalAddressLookups
 
 ALL_INTERFACES = "0.0.0.0"
 
@@ -68,17 +67,6 @@ def dotenv_files(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     return variables
 
 
-@pytest.fixture(autouse=True)
-def restore_access_log_filters() -> Iterator[None]:
-    loggers = [logging.getLogger(name) for name in consul_flask.ACCESS_LOGGERS]
-    filters = [list(access_logger.filters) for access_logger in loggers]
-
-    yield
-
-    for access_logger, previous in zip(loggers, filters, strict=True):
-        access_logger.filters = previous
-
-
 @pytest.fixture
 def agent() -> FakeAgent:
     return FakeAgent()
@@ -90,21 +78,6 @@ def server(monkeypatch: pytest.MonkeyPatch, agent: FakeAgent) -> Server:
     monkeypatch.setattr(werkzeug.serving, "run_simple", server.run_simple)
 
     return server
-
-
-@pytest.fixture
-def local_address(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Make the local address 10.0.0.5, and record the agent URLs it was asked for."""
-    agent_urls: list[str] = []
-
-    def find_local_address(agent_url: str) -> str:
-        agent_urls.append(agent_url)
-
-        return "10.0.0.5"
-
-    monkeypatch.setattr(_common, "find_local_address", find_local_address)
-
-    return agent_urls
 
 
 def registered(agent: FakeAgent, field: str) -> object:
@@ -125,7 +98,7 @@ def health_log_filters(logger_name: str) -> list[HealthCheckLogFilter]:
 def test_run_registers_before_listening(
     server: Server,
     agent: FakeAgent,
-    local_address: list[str],
+    local_address: LocalAddressLookups,
 ) -> None:
     application = flask.Flask(__name__)
     _ = ConsulExtension(
@@ -140,7 +113,7 @@ def test_run_registers_before_listening(
 
     assert server.started == [(ALL_INTERFACES, 8000)]
     assert server.registrations_before_start == [1]
-    assert local_address == ["http://consul:8500"]
+    assert local_address.agent_urls == ["http://consul:8500"]
     assert agent.sent_json() == {
         "Name": "my-service",
         "ID": "my-service",
@@ -161,7 +134,7 @@ def test_run_registers_before_listening(
 def test_run_uses_the_flask_default_port(
     server: Server,
     agent: FakeAgent,
-    local_address: list[str],
+    local_address: LocalAddressLookups,
 ) -> None:
     application = flask.Flask(__name__)
     _ = ConsulExtension(application, name="my-service", consul=agent.consul())
@@ -169,7 +142,7 @@ def test_run_uses_the_flask_default_port(
     application.run(load_dotenv=False)
 
     assert server.started == [("127.0.0.1", 5000)]
-    assert len(local_address) == 1
+    assert len(local_address.agent_urls) == 1
     assert registered(agent, "Port") == 5000
 
 
@@ -217,7 +190,7 @@ def test_the_given_address_wins_over_the_host(server: Server, agent: FakeAgent) 
 def test_wildcard_and_loopback_hosts_find_the_address(
     server: Server,
     agent: FakeAgent,
-    local_address: list[str],
+    local_address: LocalAddressLookups,
     host: str,
 ) -> None:
     application = flask.Flask(__name__)
@@ -226,7 +199,7 @@ def test_wildcard_and_loopback_hosts_find_the_address(
     application.run(host=host, port=8000, load_dotenv=False)
 
     assert len(server.started) == 1
-    assert len(local_address) == 1
+    assert len(local_address.agent_urls) == 1
     assert registered(agent, "Address") == "10.0.0.5"
 
 
@@ -257,7 +230,7 @@ def test_the_agent_comes_from_the_environment(
     monkeypatch: pytest.MonkeyPatch,
     server: Server,
     agent: FakeAgent,
-    local_address: list[str],
+    local_address: LocalAddressLookups,
 ) -> None:
     monkeypatch.setenv("CONSUL_HOST", "consul")
     monkeypatch.setenv("CONSUL_PORT", "8600")
@@ -267,7 +240,7 @@ def test_the_agent_comes_from_the_environment(
     _ = ConsulExtension(application, name="my-service")
     application.run(port=8000, load_dotenv=False)
 
-    assert local_address == ["http://consul:8600"]
+    assert local_address.agent_urls == ["http://consul:8600"]
     assert str(agent.requests[0].url) == "http://consul:8600/v1/agent/service/register"
     assert server.registrations_before_start == [1]
 
@@ -585,7 +558,10 @@ def test_deregister_without_registration_does_nothing(agent: FakeAgent) -> None:
     assert agent.requests == []
 
 
-def test_deregistration_failures_are_raised(agent: FakeAgent) -> None:
+def test_deregistration_failures_are_logged(
+    agent: FakeAgent,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     extension = ConsulExtension(
         flask.Flask(__name__),
         name="my-service",
@@ -596,9 +572,11 @@ def test_deregistration_failures_are_raised(agent: FakeAgent) -> None:
 
     agent.status_code = 500
     agent.body = "agent is shutting down"
+    extension.deregister()
+    extension.deregister()
 
-    with pytest.raises(ConsulError, match="agent is shutting down"):
-        extension.deregister()
+    assert "consul deregistration failed - name=my-service" in caplog.text
+    assert len(agent.requests) == 2
 
 
 def test_two_applications_stay_apart(server: Server, agent: FakeAgent) -> None:

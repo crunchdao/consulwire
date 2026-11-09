@@ -21,13 +21,11 @@ from starlette.responses import Response
 from starlette.routing import Route
 
 from consulwire._client import AsyncConsul
-from consulwire._environment import find_url
-from consulwire.errors import ConsulError
 from consulwire.integrations._common import (
     DEFAULT_CHECK_INTERVAL,
     DEFAULT_DEREGISTER_CRITICAL_AFTER,
     DEFAULT_HEALTH_PATH,
-    health_check,
+    Registration,
     hide_health_checks,
     registering_server,
     resolve_address,
@@ -129,11 +127,16 @@ class ConsulLifespan:
 
         self._address: str | None = address
         self._consul: AsyncConsul | None = consul
-        self._check_interval: timedelta = check_interval
-        self._deregister_critical_after: timedelta | None = deregister_critical_after
-        self._tags: Sequence[str] = tags
-        self._meta: Mapping[str, str] = meta or {}
         self._log_health_checks: bool = log_health_checks
+        self._registration: Registration = Registration(
+            name=name,
+            health_path=health_path,
+            check_interval=check_interval,
+            deregister_critical_after=deregister_critical_after,
+            tags=tags,
+            meta=meta or {},
+            logger=logger,
+        )
 
     def __call__(self, application: Starlette) -> AbstractAsyncContextManager[None]:
         """Called by Starlette at each startup, ``--reload`` included: one registration per run."""
@@ -152,74 +155,26 @@ class ConsulLifespan:
             yield
             return
 
-        consul, owned = self._agent_client()
+        consul, owned = self._registration.agent_client(self._consul, AsyncConsul)
         if consul is None:
-            logger.info("consul registration skipped, no agent configured - name=%s", self.name)
             yield
             return
 
         try:
-            await self._register(consul)
+            address = self._address
+
+            if address is None:
+                address = await anyio.to_thread.run_sync(resolve_address, None, None, consul.url)
+
+            await self._registration.register_async(consul, address, self.port)
 
             try:
                 yield
             finally:
-                await self._deregister(consul)
+                await self._registration.deregister_async(consul)
         finally:
             if owned:
                 await consul.close()
-
-    async def _register(self, consul: AsyncConsul) -> None:
-        address = self._address
-
-        if address is None:
-            address = await anyio.to_thread.run_sync(resolve_address, None, None, consul.url)
-
-        await consul.agent.register_service(
-            self.name,
-            service_id=self.name,
-            address=address,
-            port=self.port,
-            tags=self._tags,
-            meta=self._meta,
-            checks=[
-                health_check(
-                    address,
-                    self.port,
-                    self.health_path,
-                    interval=self._check_interval,
-                    deregister_critical_after=self._deregister_critical_after,
-                ),
-            ],
-        )
-
-        logger.info(
-            "registered in consul - name=%s address=%s port=%d agent=%s",
-            self.name,
-            address,
-            self.port,
-            consul.url,
-        )
-
-    async def _deregister(self, consul: AsyncConsul) -> None:
-        """Deregister without failing the shutdown: Consul removes the instance later anyway."""
-        try:
-            await consul.agent.deregister_service(self.name)
-        except ConsulError as error:
-            logger.warning("consul deregistration failed - name=%s error=`%s`", self.name, error)
-        else:
-            logger.info("deregistered from consul - name=%s", self.name)
-
-    def _agent_client(self) -> tuple[AsyncConsul | None, bool]:
-        """Return the client, and whether this lifespan owns it."""
-        if self._consul is not None:
-            return self._consul, False
-
-        url = find_url()
-        if url is None:
-            return None, False
-
-        return AsyncConsul(url), True
 
 
 def _ensure_health_route(application: Starlette, health_path: str) -> None:
