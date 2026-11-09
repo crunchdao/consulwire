@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import httpx
 import pytest
+from typing_extensions import override
 
 from consulwire import AsyncConsul, ConfigurationError, Consul, HTTPStatusError, TransportError
 from consulwire._duration import format_duration, parse_duration
@@ -274,3 +275,64 @@ def test_parse_duration(duration: str, parsed: timedelta) -> None:
 def test_parse_duration_refuses_other_text(duration: str) -> None:
     with pytest.raises(ValueError, match="not a duration"):
         _ = parse_duration(duration)
+
+
+class SyncOnlyTransport(httpx.BaseTransport):
+    @override
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request)
+
+
+class AsyncOnlyTransport(httpx.AsyncBaseTransport):
+    @override
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, request=request)
+
+
+@pytest.mark.anyio
+async def test_as_async_keeps_the_agent_token_and_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = FakeAgent()
+    monkeypatch.setenv("CONSUL_HTTP_TOKEN", "a0b1c2d3e4f5")
+    consul = Consul("http://consul:8600/", timeout=3.0, transport=agent.transport())
+    monkeypatch.delenv("CONSUL_HTTP_TOKEN")
+
+    async with consul.as_async() as converted:
+        await converted.agent.deregister_service("my-service")
+
+    request = agent.requests[0]
+    assert converted.url == "http://consul:8600"
+    assert str(request.url) == "http://consul:8600/v1/agent/service/deregister/my-service"
+    assert request.headers["X-Consul-Token"] == "a0b1c2d3e4f5"
+    assert request.extensions["timeout"]["read"] == 3.0
+
+
+@pytest.mark.anyio
+async def test_as_sync_keeps_the_agent_token_and_timeout() -> None:
+    agent = FakeAgent()
+    consul = AsyncConsul(
+        "http://consul:8600", token="a0b1c2d3e4f5", timeout=3.0, transport=agent.transport()
+    )
+
+    with consul.as_sync() as converted:
+        converted.agent.deregister_service("my-service")
+
+    request = agent.requests[0]
+    assert str(request.url) == "http://consul:8600/v1/agent/service/deregister/my-service"
+    assert request.headers["X-Consul-Token"] == "a0b1c2d3e4f5"
+    assert request.extensions["timeout"]["read"] == 3.0
+
+    await consul.agent.deregister_service("still-open")
+    assert len(agent.requests) == 2
+
+
+def test_converted_clients_without_transport_use_the_network() -> None:
+    assert Consul("http://consul:8500").as_async().url == "http://consul:8500"
+    assert AsyncConsul("http://consul:8500").as_sync().url == "http://consul:8500"
+
+
+def test_a_transport_of_one_mode_cannot_be_converted() -> None:
+    with pytest.raises(TypeError, match="only works synchronously"):
+        _ = Consul(transport=SyncOnlyTransport()).as_async()
+
+    with pytest.raises(TypeError, match="only works asynchronously"):
+        _ = AsyncConsul(transport=AsyncOnlyTransport()).as_sync()

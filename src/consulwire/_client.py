@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
+import httpx
+
 from consulwire._environment import DEFAULT_URL, find_token, find_url
 from consulwire._transport import AsyncTransport, Transport
 from consulwire.agent import Agent, AsyncAgent
@@ -17,7 +19,6 @@ if TYPE_CHECKING:
     from datetime import timedelta
     from types import TracebackType
 
-    import httpx
     from typing_extensions import Self
 
 DEFAULT_TIMEOUT: Final = 10.0
@@ -74,9 +75,12 @@ class Consul:
             ConfigurationError: The URL is not given and the environment holds an invalid value.
         """
         self.url = _resolve_url(url)
+        self._token: str | None = token or find_token()
+        self._timeout: float = timeout
+        self._http_transport: httpx.BaseTransport | None = transport
         self._transport: Transport = Transport(
             self.url,
-            token=token or find_token(),
+            token=self._token,
             timeout=timeout,
             transport=transport,
         )
@@ -124,6 +128,30 @@ class Consul:
             lock_delay=lock_delay,
             timeout=timeout,
         )
+
+    def as_async(self) -> AsyncConsul:
+        """Return an asynchronous client of the same agent, with the same token and timeout.
+
+        It is a new client, with connections of its own: closing one leaves the other open.
+
+        Example:
+            ```python
+            consul = Consul()
+            lifespan = ConsulLifespan(name="my-service", port=8000, consul=consul.as_async())
+            ```
+
+        Raises:
+            TypeError: The client was given an HTTP ``transport`` whose class only works
+                synchronously. A ``MockTransport`` with a sync handler passes, then fails at its
+                first request.
+        """
+        transport = self._http_transport
+
+        if transport is not None and not isinstance(transport, httpx.AsyncBaseTransport):
+            message = "the HTTP transport of this client only works synchronously"
+            raise TypeError(message)
+
+        return AsyncConsul(self.url, token=self._token, timeout=self._timeout, transport=transport)
 
     def close(self) -> None:
         """Close the connections to the agent."""
@@ -183,9 +211,12 @@ class AsyncConsul:
             ConfigurationError: The URL is not given and the environment holds an invalid value.
         """
         self.url = _resolve_url(url)
+        self._token: str | None = token or find_token()
+        self._timeout: float = timeout
+        self._http_transport: httpx.AsyncBaseTransport | None = transport
         self._transport: AsyncTransport = AsyncTransport(
             self.url,
-            token=token or find_token(),
+            token=self._token,
             timeout=timeout,
             transport=transport,
         )
@@ -216,6 +247,22 @@ class AsyncConsul:
             lock_delay=lock_delay,
             timeout=timeout,
         )
+
+    def as_sync(self) -> Consul:
+        """Return a synchronous client of the same agent, like :meth:`Consul.as_async`.
+
+        Raises:
+            TypeError: The client was given an HTTP ``transport`` whose class only works
+                asynchronously. A ``MockTransport`` with an async handler passes, then fails at its
+                first request.
+        """
+        transport = self._http_transport
+
+        if transport is not None and not isinstance(transport, httpx.BaseTransport):
+            message = "the HTTP transport of this client only works asynchronously"
+            raise TypeError(message)
+
+        return Consul(self.url, token=self._token, timeout=self._timeout, transport=transport)
 
     async def close(self) -> None:
         """Close the connections to the agent."""

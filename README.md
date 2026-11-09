@@ -489,6 +489,18 @@ async with AsyncConsul() as consul:
 
 Both clients describe their requests with the same code, so they cannot drift apart.
 
+An application that needs both, like a FastAPI service with plain `def` endpoints, configures one and converts it, with the same agent, token and timeout:
+
+```python
+consul = Consul("http://consul:8500", token="a0b1c2d3e4f5g6h7i8j9")
+
+async_consul = consul.as_async()  # and AsyncConsul.as_sync() the other way
+```
+
+> [!NOTE]
+> The converted client is a new one, with connections of its own: closing one leaves the other open. <br />
+> A client given an HTTP `transport`, as in tests, passes it on when the transport's class supports the other mode, and raises `TypeError` otherwise. A `MockTransport` whose handler is only sync or only async still fails at its first request: build the test clients of both kinds from the [in-memory agent](#testing) instead, with `agent.consul()` and `agent.async_consul()`.
+
 ## Errors
 
 Every error raised by the package derives from `ConsulError`:
