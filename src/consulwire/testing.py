@@ -12,6 +12,12 @@ Example:
 
     assert agent.services == {}
     ```
+
+    Instances pass their checks until told otherwise, to test how a caller handles a failing one:
+
+    ```python
+    agent.set_passing("scoring-service-1", passing=False)
+    ```
 """
 
 from __future__ import annotations
@@ -33,14 +39,24 @@ from consulwire.kv._entry import Entry
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["AGENT_URL", "InMemoryAgent"]
+__all__ = ["AGENT_URL", "NODE", "NODE_ADDRESS", "InMemoryAgent"]
 
 AGENT_URL: Final = "http://127.0.0.1:8500"
 """URL of the clients the agent creates. Nothing is sent to it: the requests stay in memory."""
 
+NODE: Final = "in-memory"
+"""Name of the node every service is registered on."""
+
+NODE_ADDRESS: Final = "127.0.0.1"
+"""Address of the node, used for the instances registered without an address."""
+
 _KV_PATH: Final = "/v1/kv/"
 
 _DEREGISTER_PATH: Final = "/v1/agent/service/deregister/"
+
+_CATALOG_SERVICE_PATH: Final = "/v1/catalog/service/"
+
+_HEALTH_SERVICE_PATH: Final = "/v1/health/service/"
 
 _POLL_INTERVAL: Final = 0.005
 """Seconds between two looks at the store while an asynchronous blocking query waits."""
@@ -49,8 +65,9 @@ _POLL_INTERVAL: Final = 0.005
 class InMemoryAgent:
     """Answer the requests of consulwire's clients like a Consul agent, from memory.
 
-    Supports registering and deregistering services, and the key/value store with check-and-set and
-    blocking queries. Every request is recorded in :attr:`requests`. Other endpoints answer 404.
+    Supports registering and deregistering services, listing them through the catalog and health
+    endpoints, and the key/value store with check-and-set. Reads block like Consul's blocking
+    queries. Every request is recorded in :attr:`requests`. Other endpoints answer 404.
     Thread-safe: a watch can wait in one thread while another writes.
     """
 
@@ -63,6 +80,7 @@ class InMemoryAgent:
         self._condition: threading.Condition = threading.Condition()
         self._index: int = 1
         self._services: dict[str, dict[str, object]] = {}
+        self._failing: set[str] = set()
         self._entries: dict[str, Entry] = {}
 
     @property
@@ -76,6 +94,24 @@ class InMemoryAgent:
         """A copy of the key/value store."""
         with self._condition:
             return {key: entry.value for key, entry in sorted(self._entries.items())}
+
+    def set_passing(self, service_id: str, *, passing: bool) -> None:
+        """Make an instance pass or fail its checks, which wakes the watches of its service.
+
+        Raises:
+            LookupError: No instance has this ID.
+        """
+        with self._condition:
+            if service_id not in self._services:
+                message = f"no instance has the ID {service_id!r}"
+                raise LookupError(message)
+
+            if passing:
+                self._failing.discard(service_id)
+            else:
+                self._failing.add(service_id)
+
+            self._changed()
 
     def consul(self, *, timeout: float = 10.0) -> Consul:
         """Return a client of this agent."""
@@ -102,7 +138,7 @@ class InMemoryAgent:
         with self._condition:
             if blocking is not None:
                 index, wait = blocking
-                _ = self._condition.wait_for(lambda: self._index > index, timeout=wait)
+                _ = self._condition.wait_for(lambda: self._changed_since(index), timeout=wait)
 
             return self._respond(request)
 
@@ -138,17 +174,46 @@ class InMemoryAgent:
         with self._condition:
             return self._index > index
 
-    def _respond(self, request: httpx.Request) -> httpx.Response:
-        path = request.url.path
+    def _changed(self) -> None:
+        self._index += 1
+        self._condition.notify_all()
 
-        if path.startswith(_KV_PATH):
-            return self._respond_kv(request, unquote(path.removeprefix(_KV_PATH)))
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        parameters = dict(request.url.params)
+
+        for respond in (self._respond_kv, self._respond_agent, self._respond_discovery):
+            response = respond(request, parameters)
+
+            if response is not None:
+                return response
+
+        return httpx.Response(
+            404, text=f"the in-memory agent does not support {request.method} {request.url.path}"
+        )
+
+    def _read(self, body: object) -> httpx.Response:
+        """Answer a read with the index of the agent, ``404`` when there is nothing to answer."""
+        headers = {"X-Consul-Index": str(self._index)}
+
+        if body is None:
+            return httpx.Response(404, headers=headers)
+
+        return httpx.Response(200, headers=headers, json=body)
+
+    def _respond_agent(
+        self,
+        request: httpx.Request,
+        _parameters: Mapping[str, str],
+    ) -> httpx.Response | None:
+        path = request.url.path
 
         if request.method == "PUT" and path == "/v1/agent/service/register":
             service = _json_object(request.content)
-            name = service.get("Name")
+            service_id = str(service.get("ID") or service.get("Name"))
 
-            self._services[str(service.get("ID") or name)] = service
+            self._services[service_id] = service
+            self._failing.discard(service_id)
+            self._changed()
 
             return httpx.Response(200)
 
@@ -158,17 +223,77 @@ class InMemoryAgent:
             if self._services.pop(service_id, None) is None:
                 return httpx.Response(404, text=f'Unknown service ID "{service_id}"')
 
+            self._failing.discard(service_id)
+            self._changed()
+
             return httpx.Response(200)
 
-        return httpx.Response(
-            404, text=f"the in-memory agent does not support {request.method} {path}"
-        )
+        return None
 
-    def _respond_kv(self, request: httpx.Request, key: str) -> httpx.Response:
-        parameters = dict(request.url.params)
+    def _respond_discovery(
+        self,
+        request: httpx.Request,
+        parameters: Mapping[str, str],
+    ) -> httpx.Response | None:
+        path = request.url.path
+
+        if request.method != "GET":
+            return None
+
+        if path == "/v1/catalog/services":
+            tags: dict[str, set[str]] = {}
+
+            for service in self._services.values():
+                tags.setdefault(str(service.get("Name")), set()).update(_tags(service))
+
+            return self._read({name: sorted(found) for name, found in sorted(tags.items())})
+
+        if path.startswith(_CATALOG_SERVICE_PATH):
+            name = unquote(path.removeprefix(_CATALOG_SERVICE_PATH))
+            instances = self._instances(name, parameters.get("tag"))
+
+            return self._read(
+                [_catalog_payload(service_id, service) for service_id, service in instances]
+            )
+
+        if path.startswith(_HEALTH_SERVICE_PATH):
+            name = unquote(path.removeprefix(_HEALTH_SERVICE_PATH))
+            instances = [
+                (service_id, service)
+                for service_id, service in self._instances(name, parameters.get("tag"))
+                if not ("passing" in parameters and service_id in self._failing)
+            ]
+
+            return self._read(
+                [
+                    _health_payload(service_id, service, passing=service_id not in self._failing)
+                    for service_id, service in instances
+                ]
+            )
+
+        return None
+
+    def _instances(self, name: str, tag: str | None) -> list[tuple[str, dict[str, object]]]:
+        return [
+            (service_id, service)
+            for service_id, service in sorted(self._services.items())
+            if service.get("Name") == name and (tag is None or tag in _tags(service))
+        ]
+
+    def _respond_kv(
+        self,
+        request: httpx.Request,
+        parameters: Mapping[str, str],
+    ) -> httpx.Response | None:
+        path = request.url.path
+
+        if not path.startswith(_KV_PATH):
+            return None
+
+        key = unquote(path.removeprefix(_KV_PATH))
 
         if request.method == "GET":
-            return self._read(key, parameters)
+            return self._read(self._kv_body(key, parameters) or None)
 
         cas = parameters.get("cas")
         current = self._entries.get(key)
@@ -185,29 +310,19 @@ class InMemoryAgent:
 
         return httpx.Response(200, json=True)
 
-    def _read(self, key: str, parameters: Mapping[str, str]) -> httpx.Response:
-        headers = {"X-Consul-Index": str(self._index)}
-
+    def _kv_body(self, key: str, parameters: Mapping[str, str]) -> list[object]:
         if "keys" in parameters:
-            names = _key_names(key, sorted(self._entries), parameters.get("separator"))
-
-            if not names:
-                return httpx.Response(404, headers=headers)
-
-            return httpx.Response(200, headers=headers, json=names)
+            return list(_key_names(key, sorted(self._entries), parameters.get("separator")))
 
         if "recurse" in parameters:
             found = [entry for name, entry in sorted(self._entries.items()) if name.startswith(key)]
         else:
             found = [self._entries[key]] if key in self._entries else []
 
-        if not found:
-            return httpx.Response(404, headers=headers)
-
-        return httpx.Response(200, headers=headers, json=[_entry_payload(entry) for entry in found])
+        return [_entry_payload(entry) for entry in found]
 
     def _write(self, key: str, value: bytes, flags: int, current: Entry | None) -> None:
-        self._index += 1
+        self._changed()
 
         self._entries[key] = Entry(
             key=key,
@@ -219,16 +334,12 @@ class InMemoryAgent:
             session=None,
         )
 
-        self._condition.notify_all()
-
     def _delete(self, key: str, *, recurse: bool) -> None:
-        self._index += 1
+        self._changed()
 
         for name in list(self._entries):
             if name == key or (recurse and name.startswith(key)):
                 del self._entries[name]
-
-        self._condition.notify_all()
 
 
 def _key_names(prefix: str, names: list[str], separator: str | None) -> list[str]:
@@ -257,6 +368,54 @@ def _entry_payload(entry: Entry) -> dict[str, object]:
         "CreateIndex": entry.create_index,
         "ModifyIndex": entry.modify_index,
         "LockIndex": entry.lock_index,
+    }
+
+
+def _tags(service: Mapping[str, object]) -> list[str]:
+    return cast("list[str]", service.get("Tags") or [])
+
+
+def _service_payload(service_id: str, service: Mapping[str, object]) -> dict[str, object]:
+    """Return the instance as the health endpoint describes it."""
+    return {
+        "ID": service_id,
+        "Service": service.get("Name"),
+        "Address": service.get("Address", ""),
+        "Port": service.get("Port", 0),
+        "Tags": _tags(service),
+        "Meta": service.get("Meta") or {},
+    }
+
+
+def _catalog_payload(service_id: str, service: Mapping[str, object]) -> dict[str, object]:
+    """Return the instance as the catalog describes it: the same fields, prefixed by Service."""
+    fields = _service_payload(service_id, service)
+
+    return {
+        "Node": NODE,
+        "Address": NODE_ADDRESS,
+        "ServiceID": fields.pop("ID"),
+        "ServiceName": fields.pop("Service"),
+        **{f"Service{name}": value for name, value in fields.items()},
+    }
+
+
+def _health_payload(
+    service_id: str,
+    service: Mapping[str, object],
+    *,
+    passing: bool,
+) -> dict[str, object]:
+    return {
+        "Node": {"Node": NODE, "Address": NODE_ADDRESS},
+        "Service": _service_payload(service_id, service),
+        "Checks": [
+            {
+                "CheckID": f"service:{service_id}",
+                "ServiceID": service_id,
+                "Status": "passing" if passing else "critical",
+            },
+        ],
     }
 
 

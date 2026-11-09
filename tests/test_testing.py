@@ -65,12 +65,17 @@ def raw_client(agent: InMemoryAgent) -> httpx.Client:
     return httpx.Client(base_url=AGENT_URL, transport=agent.transport())
 
 
-def test_other_endpoints_answer_not_found(agent: InMemoryAgent) -> None:
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [("GET", "/v1/session/list"), ("POST", "/v1/catalog/services")],
+    ids=["another endpoint", "another method"],
+)
+def test_other_endpoints_answer_not_found(agent: InMemoryAgent, method: str, path: str) -> None:
     with raw_client(agent) as client:
-        response = client.get("/v1/catalog/services")
+        response = client.request(method, path)
 
     assert response.status_code == 404
-    assert response.text == "the in-memory agent does not support GET /v1/catalog/services"
+    assert response.text == f"the in-memory agent does not support {method} {path}"
 
 
 def test_other_methods_on_keys_are_not_allowed(agent: InMemoryAgent) -> None:

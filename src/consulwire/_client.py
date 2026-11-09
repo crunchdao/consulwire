@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Final
 from consulwire._environment import DEFAULT_URL, find_token, find_url
 from consulwire._transport import AsyncTransport, Transport
 from consulwire.agent import Agent, AsyncAgent
+from consulwire.catalog import AsyncCatalog, Catalog
+from consulwire.health import AsyncHealth, Health
 from consulwire.kv import KV, AsyncKV
 
 if TYPE_CHECKING:
@@ -34,6 +36,12 @@ class Consul:
 
     agent: Agent
     """Services and health checks of this machine."""
+
+    catalog: Catalog
+    """Every service of the cluster, healthy or not."""
+
+    health: Health
+    """The healthy instances of the services, to call them."""
 
     kv: KV
     """Key/value store."""
@@ -68,6 +76,8 @@ class Consul:
         )
 
         self.agent = Agent(self._transport)
+        self.catalog = Catalog(self._transport)
+        self.health = Health(self._transport)
         self.kv = KV(self._transport)
 
     def close(self) -> None:
@@ -102,6 +112,12 @@ class AsyncConsul:
     agent: AsyncAgent
     """Services and health checks of this machine."""
 
+    catalog: AsyncCatalog
+    """Every service of the cluster, healthy or not."""
+
+    health: AsyncHealth
+    """The healthy instances of the services, to call them."""
+
     kv: AsyncKV
     """Key/value store."""
 
@@ -127,6 +143,8 @@ class AsyncConsul:
         )
 
         self.agent = AsyncAgent(self._transport)
+        self.catalog = AsyncCatalog(self._transport)
+        self.health = AsyncHealth(self._transport)
         self.kv = AsyncKV(self._transport)
 
     async def close(self) -> None:

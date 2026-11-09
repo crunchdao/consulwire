@@ -20,6 +20,11 @@ _DEFAULT_ROUTE_PROBES: Final[dict[socket.AddressFamily, SocketAddress]] = {
 default route leads to them."""
 
 
+def url_host(address: str) -> str:
+    """Return the address as the host of a URL: IPv6 addresses go in brackets."""
+    return f"[{address}]" if ":" in address else address
+
+
 def find_local_address(agent_url: str) -> str:
     """Return the local IP address the agent can reach this process at.
 

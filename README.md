@@ -15,6 +15,10 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 		- [Check-and-Set](#check-and-set)
 		- [List Keys](#list-keys)
 		- [Watch Changes](#watch-changes)
+	- [Find a Service](#find-a-service)
+		- [Healthy Instances](#healthy-instances)
+		- [Every Instance](#every-instance)
+		- [Call Another Service](#call-another-service)
 	- [Asynchronous Client](#asynchronous-client)
 	- [Errors](#errors)
 	- [Testing](#testing)
@@ -84,7 +88,14 @@ The environment variables of the official tools are read first, then the ones of
 
 ## Usage
 
-The client is organized like the [Consul HTTP API](https://developer.hashicorp.com/consul/api-docs): each section of the API is an attribute of the client, `consul.agent` for the services of this machine and `consul.kv` for the [key/value store](#keyvalue-store).
+The client is organized like the [Consul HTTP API](https://developer.hashicorp.com/consul/api-docs): each section of the API is an attribute of the client:
+
+| Section          | Meaning                                                                          |
+| ---------------- | -------------------------------------------------------------------------------- |
+| `consul.agent`   | The services of this machine: [register](#register-a-service) and deregister.    |
+| `consul.kv`      | The [key/value store](#keyvalue-store).                                          |
+| `consul.health`  | The [healthy instances](#healthy-instances) of a service, the ones to call.     |
+| `consul.catalog` | [Every instance](#every-instance) of every service, healthy or not.              |
 
 ### Register a Service
 
@@ -238,6 +249,128 @@ for entry in consul.kv.watch("my-service/feature-flag"):
 
 Each request is held up to `wait`, 5 minutes by default and 10 at most, and the client waits that long on top of its timeout.
 
+## Find a Service
+
+### Healthy Instances
+
+`consul.health.service` returns the instances of a service that pass every check: the ones to call.
+
+```python
+instances = consul.health.service("scoring-service")
+instance = instances[0]
+
+instance.url("/score")  # "http://10.0.0.5:8005/score"
+```
+
+| Attribute | Meaning                                                                               |
+| --------- | ------------------------------------------------------------------------------------- |
+| `id`      | Instance ID, unique on its agent.                                                     |
+| `name`    | Service name.                                                                         |
+| `address` | Address to connect to: the one the instance registered, or its node's otherwise.     |
+| `port`    | Port to connect to.                                                                   |
+| `tags`    | Service tags.                                                                         |
+| `meta`    | Service key and value pairs.                                                          |
+| `node`    | Name of the node the instance is registered on.                                       |
+
+`tag="internal"` keeps the instances with that tag. An unknown service has no instance.
+
+`watch_service` follows them through blocking queries, like the [key/value watches](#watch-changes): it yields the instances now, then every time one starts, stops, or fails its checks.
+
+```python
+for instances in consul.health.watch_service("scoring-service"):
+    ...
+```
+
+> [!NOTE]
+> An instance in warning, like one answering `429 Too Many Requests` to its health check, does not pass. `passing=False` returns every instance with its health unknown.
+
+### Every Instance
+
+`consul.catalog` lists what is registered, healthy or not:
+
+```python
+consul.catalog.services()  # {"consul": [], "scoring-service": ["internal"]}
+consul.catalog.service("scoring-service")  # every instance, failing ones included
+```
+
+### Call Another Service
+
+Each call can go to the next healthy instance, so the load is spread and a failing instance leaves the rotation within a check interval. A watch keeps the list up to date in a thread, so picking an instance sends nothing to Consul.
+
+<details>
+<summary><code>RoundRobin</code>: the healthy instances, followed by a watch, picked in turn</summary>
+
+```python
+import itertools
+import logging
+import threading
+import time
+
+from consulwire import Consul, ConsulError
+from consulwire.health import ServiceInstance
+
+logger = logging.getLogger(__name__)
+
+
+class RoundRobin:
+    """The healthy instances of a service, each call picking the next one."""
+
+    def __init__(self, consul: Consul, name: str) -> None:
+        self.name = name
+        self._consul = consul
+        self._instances: list[ServiceInstance] = consul.health.service(name)
+        self._turns = itertools.count()
+
+        threading.Thread(target=self._follow, name=f"watch {name}", daemon=True).start()
+
+    def pick(self) -> ServiceInstance:
+        instances = self._instances  # replaced as a whole by the watch, never changed in place
+
+        if not instances:
+            message = f"no healthy instance of {self.name}"
+            raise LookupError(message)
+
+        return instances[next(self._turns) % len(instances)]
+
+    def _follow(self) -> None:
+        while True:
+            try:
+                for instances in self._consul.health.watch_service(self.name):
+                    self._instances = instances
+            except ConsulError as error:
+                logger.warning("watch of %s failed, retrying in 5 seconds: %s", self.name, error)
+                time.sleep(5)
+```
+
+</details>
+
+Create it once, next to the client, and pick an instance for each call. An instance can still stop between two health checks: trying the next one covers it.
+
+```python
+import httpx
+
+consul = Consul()
+scoring = RoundRobin(consul, "scoring-service")
+
+
+def score(body: dict) -> dict:
+    for _ in range(3):
+        instance = scoring.pick()
+
+        try:
+            response = httpx.post(instance.url("/score"), json=body, timeout=60)
+        except httpx.TransportError:
+            continue  # unreachable: the next instance
+
+        response.raise_for_status()
+        return response.json()
+
+    raise RuntimeError("no instance of scoring-service answered")
+```
+
+> [!TIP]
+> The client must stay open as long as the rotation is used: the watch shares it. When the agent restarts, the watch fails, waits 5 seconds and starts again, while `pick` keeps the last known instances.
+
 ## Asynchronous Client
 
 `AsyncConsul` has the same API, with coroutines:
@@ -277,7 +410,7 @@ except ConsulError as error:
 
 ## Testing
 
-`consulwire.testing.InMemoryAgent` answers both clients from memory, the way an agent would: service registration, and the key/value store with check-and-set and blocking queries. An application and its integration are tested without Consul:
+`consulwire.testing.InMemoryAgent` answers both clients from memory, the way an agent would: service registration, the catalog and health lookups, and the key/value store with check-and-set, all with blocking queries. An application and its integration are tested without Consul:
 
 ```python
 from consulwire.testing import InMemoryAgent
@@ -298,8 +431,9 @@ assert agent.services == {}  # deregistered at shutdown
 | `agent.services`                               | Registered services by instance ID, with Consul's field names: `Name`, `Port`, `Checks`. |
 | `agent.kv`                                     | A copy of the key/value store.                                                 |
 | `agent.requests`                               | Every request received, as `httpx.Request`.                                    |
+| `agent.set_passing(service_id, passing=False)` | Make an instance fail its checks, to test a caller: it leaves `health.service`. |
 
-Other endpoints answer `404`.
+Instances pass their checks until told otherwise. Other endpoints answer `404`.
 
 # Integrations
 
