@@ -6,23 +6,19 @@ bytes: the application decides their format.
 
 from __future__ import annotations
 
-from datetime import timedelta
-from typing import TYPE_CHECKING, Final, TypeVar
+from typing import TYPE_CHECKING
 
+from consulwire._blocking import DEFAULT_WAIT, BlockingQuery, follow, follow_async
 from consulwire.kv import _requests
 from consulwire.kv._entry import Entry
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
+    from datetime import timedelta
 
     from consulwire._transport import AsyncTransport, Transport
 
-__all__ = ["DEFAULT_WAIT", "KV", "AsyncKV", "Entry"]
-
-DEFAULT_WAIT: Final = timedelta(minutes=5)
-"""Longest time the agent holds a watch query before answering an unchanged value."""
-
-_T = TypeVar("_T")
+__all__ = ["KV", "AsyncKV", "Entry"]
 
 
 class KV:
@@ -143,11 +139,12 @@ class KV:
             HTTPStatusError: The agent refused the request.
             ResponseError: The agent answered something else than an entry.
         """
-        return self._watch(
-            _requests.BlockingQuery(
+        return follow(
+            self._transport,
+            BlockingQuery(
                 lambda index: _requests.get(key, index=index, wait=wait),
                 _requests.parse_entry,
-            )
+            ),
         )
 
     def watch_entries(
@@ -161,19 +158,13 @@ class KV:
         Works like :meth:`watch`: a key created, written or deleted under the prefix yields the
         whole list again.
         """
-        return self._watch(
-            _requests.BlockingQuery(
+        return follow(
+            self._transport,
+            BlockingQuery(
                 lambda index: _requests.entries(prefix, index=index, wait=wait),
                 _requests.parse_entries,
-            )
+            ),
         )
-
-    def _watch(self, query: _requests.BlockingQuery[_T]) -> Iterator[_T]:
-        while True:
-            changed = query.receive(self._transport.send(query.request()))
-
-            if changed is not None:
-                yield changed[0]
 
 
 class AsyncKV:
@@ -227,11 +218,12 @@ class AsyncKV:
 
     def watch(self, key: str, *, wait: timedelta = DEFAULT_WAIT) -> AsyncIterator[Entry | None]:
         """See :meth:`KV.watch`, with ``async for``."""
-        return self._watch(
-            _requests.BlockingQuery(
+        return follow_async(
+            self._transport,
+            BlockingQuery(
                 lambda index: _requests.get(key, index=index, wait=wait),
                 _requests.parse_entry,
-            )
+            ),
         )
 
     def watch_entries(
@@ -241,16 +233,10 @@ class AsyncKV:
         wait: timedelta = DEFAULT_WAIT,
     ) -> AsyncIterator[list[Entry]]:
         """See :meth:`KV.watch_entries`, with ``async for``."""
-        return self._watch(
-            _requests.BlockingQuery(
+        return follow_async(
+            self._transport,
+            BlockingQuery(
                 lambda index: _requests.entries(prefix, index=index, wait=wait),
                 _requests.parse_entries,
-            )
+            ),
         )
-
-    async def _watch(self, query: _requests.BlockingQuery[_T]) -> AsyncIterator[_T]:
-        while True:
-            changed = query.receive(await self._transport.send(query.request()))
-
-            if changed is not None:
-                yield changed[0]

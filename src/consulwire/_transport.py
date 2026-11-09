@@ -1,7 +1,7 @@
 """Send requests to the agent, synchronously or not.
 
-The sections (``agent``, ``kv``) only describe their requests as :class:`Request` values, so the
-same description is sent by both transports, and the sync and async clients cannot drift.
+The sections only describe their requests as :class:`Request` values, so the same description is
+sent by both transports, and the sync and async clients cannot drift.
 """
 
 from __future__ import annotations

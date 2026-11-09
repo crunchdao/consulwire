@@ -4,21 +4,18 @@ from __future__ import annotations
 
 import base64
 import binascii
-from typing import TYPE_CHECKING, Generic, TypeVar, cast
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
-from consulwire._duration import format_duration
+from consulwire._blocking import blocking_parameters
+from consulwire._responses import Fields, json_body, json_list, json_strings, malformed
 from consulwire._transport import NOT_FOUND, Request
-from consulwire.errors import ResponseError
 from consulwire.kv._entry import Entry
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from datetime import timedelta
 
     import httpx
-
-_T = TypeVar("_T")
 
 
 def get(key: str, *, index: int = 0, wait: timedelta | None = None) -> Request:
@@ -50,7 +47,7 @@ def get(key: str, *, index: int = 0, wait: timedelta | None = None) -> Request:
     return Request(
         "GET",
         _path(key),
-        parameters=_blocking_parameters(index, wait),
+        parameters=blocking_parameters(index, wait),
         wait=wait,
         allow_not_found=True,
     )
@@ -93,7 +90,7 @@ def entries(prefix: str, *, index: int = 0, wait: timedelta | None = None) -> Re
     return Request(
         "GET",
         _path(prefix),
-        parameters={"recurse": "true", **_blocking_parameters(index, wait)},
+        parameters={"recurse": "true", **blocking_parameters(index, wait)},
         wait=wait,
         allow_not_found=True,
     )
@@ -199,11 +196,7 @@ def parse_entries(response: httpx.Response) -> list[Entry]:
     if response.status_code == NOT_FOUND:
         return []
 
-    body = _json(response)
-    if not isinstance(body, list):
-        raise _unexpected(response, "a list of entries")
-
-    return [_entry(response, raw) for raw in cast("list[object]", body)]
+    return [_entry(Fields(response, raw, "an entry")) for raw in json_list(response)]
 
 
 def parse_entry(response: httpx.Response) -> Entry | None:
@@ -216,128 +209,33 @@ def parse_keys(response: httpx.Response) -> list[str]:
     if response.status_code == NOT_FOUND:
         return []
 
-    body = _json(response)
-    if not isinstance(body, list):
-        raise _unexpected(response, "a list of keys")
-
-    found = cast("list[object]", body)
-    if not all(isinstance(key, str) for key in found):
-        raise _unexpected(response, "a list of keys")
-
-    return cast("list[str]", found)
+    return json_strings(response)
 
 
 def parse_boolean(response: httpx.Response) -> bool:
-    body = _json(response)
+    body = json_body(response)
     if not isinstance(body, bool):
-        raise _unexpected(response, "true or false")
+        raise malformed(response, "a body that is not true or false")
 
     return body
-
-
-def parse_index(response: httpx.Response) -> int:
-    index = cast("str", response.headers.get("X-Consul-Index", ""))
-    if not index.isdigit():
-        raise _unexpected(response, "an X-Consul-Index header")
-
-    return int(index)
-
-
-class BlockingQuery(Generic[_T]):
-    """Index bookkeeping of a watch, shared by both clients.
-
-    Consul holds a blocking query until the data changes or ``wait`` runs out, then answers the
-    current data either way. Only changes are reported: the first answer, then each different one.
-    """
-
-    def __init__(
-        self,
-        request: Callable[[int], Request],
-        parse: Callable[[httpx.Response], _T],
-    ) -> None:
-        self._request: Callable[[int], Request] = request
-        self._parse: Callable[[httpx.Response], _T] = parse
-        self._index: int = 0
-        self._last: tuple[_T] | None = None
-
-    def request(self) -> Request:
-        return self._request(self._index)
-
-    def receive(self, response: httpx.Response) -> tuple[_T] | None:
-        """Return the data in a tuple when it changed, ``None`` otherwise."""
-        index = parse_index(response)
-
-        # Following Consul's guidance: an index going backwards means the agent's state was reset,
-        # so start over, and an index of 0 would make the next query return at once.
-        self._index = 0 if index < self._index else max(index, 1)
-
-        data = self._parse(response)
-
-        if self._last is not None and self._last[0] == data:
-            return None
-
-        self._last = (data,)
-
-        return self._last
 
 
 def _path(key: str) -> str:
     return f"/v1/kv/{quote(key, safe='/')}"
 
 
-def _blocking_parameters(index: int, wait: timedelta | None) -> dict[str, str]:
-    if wait is None:
-        return {}
-
-    return {"index": str(index), "wait": format_duration(wait)}
-
-
-def _json(response: httpx.Response) -> object:
+def _entry(fields: Fields) -> Entry:
     try:
-        return cast("object", response.json())
-    except ValueError as error:
-        raise _unexpected(response, "JSON") from error
-
-
-def _entry(response: httpx.Response, raw: object) -> Entry:
-    if not isinstance(raw, dict):
-        raise _unexpected(response, "a list of entries")
-
-    fields = cast("dict[str, object]", raw)
-
-    key = fields.get("Key")
-    value = fields.get("Value")
-    session = fields.get("Session")
-    indexes = [fields.get(name, 0) for name in ("Flags", "ModifyIndex", "CreateIndex", "LockIndex")]
-
-    if (
-        not isinstance(key, str)
-        or (value is not None and not isinstance(value, str))
-        or (session is not None and not isinstance(session, str))
-        or not all(isinstance(number, int) for number in indexes)
-    ):
-        raise _unexpected(response, "a list of entries")
-
-    flags, modify_index, create_index, lock_index = cast("list[int]", indexes)
-
-    try:
-        decoded = base64.b64decode(value, validate=True) if value else b""
+        value = base64.b64decode(fields.string("Value"), validate=True)
     except binascii.Error as error:
-        raise _unexpected(response, "base64 values") from error
+        raise fields.invalid("Value", "base64") from error  # noqa: EM101  # a field name
 
     return Entry(
-        key=key,
-        value=decoded,
-        flags=flags,
-        modify_index=modify_index,
-        create_index=create_index,
-        lock_index=lock_index,
-        session=session or None,
+        key=fields.string("Key"),
+        value=value,
+        flags=fields.integer("Flags"),
+        modify_index=fields.integer("ModifyIndex"),
+        create_index=fields.integer("CreateIndex"),
+        lock_index=fields.integer("LockIndex"),
+        session=fields.string("Session") or None,
     )
-
-
-def _unexpected(response: httpx.Response, expected: str) -> ResponseError:
-    """Describe a malformed answer without its body, which holds the values of the keys."""
-    request = response.request
-
-    return ResponseError(f"consul answered {request.method} {request.url.path} without {expected}")

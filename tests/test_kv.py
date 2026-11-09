@@ -12,16 +12,15 @@ import httpx
 import pytest
 
 from consulwire import HTTPStatusError, ResponseError
+from consulwire._blocking import BlockingQuery
 from consulwire._transport import Request
 from consulwire.kv import Entry
-from consulwire.kv._requests import BlockingQuery, parse_entry
+from consulwire.kv._requests import parse_entry
 from consulwire.testing import InMemoryAgent
-from tests.support import FakeAgent
+from tests.support import WATCH_WAIT, FakeAgent, answering
 
 if TYPE_CHECKING:
     from consulwire import Consul
-
-WATCH_WAIT = timedelta(seconds=5)
 
 
 def entry_payload(key: str = "my-service/flag", value: bytes | None = b"on") -> dict[str, object]:
@@ -34,10 +33,6 @@ def entry_payload(key: str = "my-service/flag", value: bytes | None = b"on") -> 
         "LockIndex": 1,
         "Session": "a0b1c2d3-e4f5-a6b7-c8d9-e0f1a2b3c4d5",
     }
-
-
-def answering(body: object, *, index: int = 12) -> FakeAgent:
-    return FakeAgent(body=json.dumps(body), headers={"X-Consul-Index": str(index)})
 
 
 @pytest.fixture
@@ -185,46 +180,65 @@ def test_a_request_keeps_the_client_timeout() -> None:
 
 
 @pytest.mark.parametrize(
-    "body",
+    ("body", "problem"),
     [
-        "not json",
-        json.dumps({"Key": "a"}),
-        json.dumps(["a"]),
-        json.dumps([{**entry_payload(), "Key": 1}]),
-        json.dumps([{**entry_payload(), "Value": 1}]),
-        json.dumps([{**entry_payload(), "Session": 1}]),
-        json.dumps([{**entry_payload(), "ModifyIndex": "12"}]),
-        json.dumps([{**entry_payload(), "Value": "not base64!"}]),
+        ("not json", "a body that is not JSON"),
+        (json.dumps({"Key": "a"}), "a body that is not a list"),
+        (json.dumps(["a"]), "an entry that is not an object"),
+        (json.dumps([{**entry_payload(), "Key": 1}]), "`Key` that is not text"),
+        (json.dumps([{**entry_payload(), "Value": 1}]), "`Value` that is not text"),
+        (json.dumps([{**entry_payload(), "Session": 1}]), "`Session` that is not text"),
+        (
+            json.dumps([{**entry_payload(), "ModifyIndex": "12"}]),
+            "`ModifyIndex` that is not a number",
+        ),
+        (json.dumps([{**entry_payload(), "Value": "not base64!"}]), "`Value` that is not base64"),
     ],
     ids=["not JSON", "an object", "a string", "key", "value", "session", "index", "base64"],
 )
-def test_malformed_entries_are_response_errors(body: str) -> None:
+def test_malformed_entries_are_response_errors(body: str, problem: str) -> None:
     consul = FakeAgent(body=body).consul()
 
-    with pytest.raises(ResponseError, match="consul answered GET /v1/kv/a without"):
+    with pytest.raises(ResponseError) as raised:
         _ = consul.kv.get("a")
 
+    assert str(raised.value) == f"consul answered GET /v1/kv/a with {problem}"
 
-@pytest.mark.parametrize("body", [{"a": 1}, ["a", 1]], ids=["an object", "a number"])
-def test_malformed_keys_are_response_errors(body: object) -> None:
+
+@pytest.mark.parametrize(
+    ("body", "problem"),
+    [
+        ({"a": 1}, "a body that is not a list of texts"),
+        (["a", 1], "a body that is not a list of texts"),
+    ],
+    ids=["an object", "a number"],
+)
+def test_malformed_keys_are_response_errors(body: object, problem: str) -> None:
     consul = answering(body).consul()
 
-    with pytest.raises(ResponseError, match="without a list of keys"):
+    with pytest.raises(ResponseError, match=problem):
         _ = consul.kv.keys()
 
 
 def test_malformed_write_answers_are_response_errors() -> None:
     consul = answering("yes").consul()
 
-    with pytest.raises(ResponseError, match="without true or false"):
+    with pytest.raises(ResponseError, match="with a body that is not true or false"):
         _ = consul.kv.put("a", "b")
 
 
-@pytest.mark.parametrize("headers", [{}, {"X-Consul-Index": "-1"}], ids=["missing", "negative"])
-def test_a_watch_needs_the_index_header(headers: dict[str, str]) -> None:
+@pytest.mark.parametrize(
+    ("headers", "problem"),
+    [
+        ({}, "no X-Consul-Index header"),
+        ({"X-Consul-Index": "-1"}, "an X-Consul-Index header that is not a number"),
+    ],
+    ids=["missing", "negative"],
+)
+def test_a_watch_needs_the_index_header(headers: dict[str, str], problem: str) -> None:
     consul = FakeAgent(body=json.dumps([entry_payload()]), headers=headers).consul()
 
-    with pytest.raises(ResponseError, match="without an X-Consul-Index header"):
+    with pytest.raises(ResponseError, match=problem):
         _ = next(consul.kv.watch("a"))
 
 

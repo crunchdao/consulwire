@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import cast
 
 import httpx
@@ -10,6 +11,9 @@ import httpx
 from consulwire import AsyncConsul, Consul
 
 AGENT_URL = "http://consul:8500"
+
+WATCH_WAIT = timedelta(seconds=5)
+"""Wait of the watches in tests: long enough to see they block."""
 
 
 class FakeAgent:
@@ -45,3 +49,8 @@ class FakeAgent:
         self.requests.append(request)
 
         return httpx.Response(self.status_code, text=self.body, headers=self.headers)
+
+
+def answering(body: object, *, index: int = 12) -> FakeAgent:
+    """Return an agent answering every read with this JSON body, at this index."""
+    return FakeAgent(body=json.dumps(body), headers={"X-Consul-Index": str(index)})
