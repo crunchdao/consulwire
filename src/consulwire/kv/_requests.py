@@ -119,8 +119,16 @@ def keys(prefix: str, *, separator: str | None) -> Request:
     return Request("GET", _path(prefix), parameters=parameters, allow_not_found=True)
 
 
-def put(key: str, value: bytes | str, *, flags: int | None, cas: int | None) -> Request:
-    """Write a key, the raw value as body.
+def put(  # noqa: PLR0913  # the options of a Consul write
+    key: str,
+    value: bytes | str,
+    *,
+    flags: int | None,
+    cas: int | None,
+    acquire: str | None,
+    release: str | None,
+) -> Request:
+    """Write a key, the raw value as body. ``acquire`` and ``release`` take a session ID.
 
     Request:
         ```http
@@ -129,13 +137,20 @@ def put(key: str, value: bytes | str, *, flags: int | None, cas: int | None) -> 
         on
         ```
 
-    Response, ``false`` only when ``cas`` did not match:
+    Response, ``false`` when ``cas`` did not match, or the lock is held by another session:
         ```http
         200 OK
 
         true
         ```
+
+    Raises:
+        ValueError: Both ``acquire`` and ``release`` are given.
     """
+    if acquire is not None and release is not None:
+        message = "a write either acquires the lock of a key or releases it, not both"
+        raise ValueError(message)
+
     parameters: dict[str, str] = {}
 
     if flags is not None:
@@ -143,6 +158,12 @@ def put(key: str, value: bytes | str, *, flags: int | None, cas: int | None) -> 
 
     if cas is not None:
         parameters["cas"] = str(cas)
+
+    if acquire is not None:
+        parameters["acquire"] = acquire
+
+    if release is not None:
+        parameters["release"] = release
 
     content = value.encode() if isinstance(value, str) else value
 

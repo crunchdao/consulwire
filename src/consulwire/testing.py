@@ -20,16 +20,22 @@ Example:
     ```
 
     An instance with a TTL check starts critical, like in Consul, until it reports with
-    ``consul.agent.pass_check()``. The time to live itself never runs out: a test reports the
-    status it needs.
+    ``consul.agent.pass_check()``. Time does not pass in the agent: TTLs never run out and keys have
+    no lock delay. A test reports the status it needs, and ends a session to lose its locks:
+
+    ```python
+    consul.session.destroy(lock.session_id)
+    ```
 """
 
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import threading
 import time
+from datetime import timedelta
 from typing import TYPE_CHECKING, Final, cast
 from urllib.parse import unquote
 
@@ -60,6 +66,10 @@ _DEREGISTER_PATH: Final = "/v1/agent/service/deregister/"
 
 _CHECK_PATH: Final = "/v1/agent/check/"
 
+_SESSION_PATH: Final = "/v1/session/"
+
+_DEFAULT_LOCK_DELAY: Final = timedelta(seconds=15)
+
 _REPORTED_STATUSES: Final = {"pass": "passing", "warn": "warning", "fail": "critical"}
 
 _CATALOG_SERVICE_PATH: Final = "/v1/catalog/service/"
@@ -74,10 +84,10 @@ class InMemoryAgent:
     """Answer the requests of consulwire's clients like a Consul agent, from memory.
 
     Supports registering and deregistering services, reporting their TTL checks, listing them
-    through the catalog and health endpoints, and the key/value store with check-and-set. Reads
-    block like Consul's blocking queries. Each instance has one status, the one of its checks.
-    Every request is recorded in :attr:`requests`. Other endpoints answer 404. Thread-safe: a
-    watch can wait in one thread while another writes.
+    through the catalog and health endpoints, the key/value store with check-and-set, and sessions
+    locking its keys. Reads block like Consul's blocking queries. Each instance has one status, the
+    one of its checks. Every request is recorded in :attr:`requests`. Other endpoints answer 404.
+    Thread-safe: a watch can wait in one thread while another writes.
     """
 
     requests: list[httpx.Request]
@@ -92,6 +102,8 @@ class InMemoryAgent:
         self._statuses: dict[str, str] = {}
         self._checks: dict[str, str] = {}
         self._entries: dict[str, Entry] = {}
+        self._sessions: dict[str, dict[str, object]] = {}
+        self._created_sessions: int = 0
 
     @property
     def services(self) -> dict[str, dict[str, object]]:
@@ -191,6 +203,7 @@ class InMemoryAgent:
             self._respond_kv,
             self._respond_agent,
             self._respond_check,
+            self._respond_session,
             self._respond_discovery,
         ):
             response = respond(request, parameters)
@@ -330,6 +343,87 @@ class InMemoryAgent:
 
         return None
 
+    def _respond_session(
+        self,
+        request: httpx.Request,
+        _parameters: Mapping[str, str],
+    ) -> httpx.Response | None:
+        path = request.url.path
+
+        if not path.startswith(_SESSION_PATH):
+            return None
+
+        action, _, quoted_session_id = path.removeprefix(_SESSION_PATH).partition("/")
+        respond = {
+            ("PUT", "create"): self._session_created,
+            ("PUT", "renew"): self._session_renewed,
+            ("PUT", "destroy"): self._session_destroyed,
+            ("GET", "info"): self._session_read,
+        }.get((request.method, action))
+
+        return None if respond is None else respond(request, unquote(quoted_session_id))
+
+    def _session_created(self, request: httpx.Request, _session_id: str) -> httpx.Response:
+        return httpx.Response(200, json={"ID": self._create_session(_json_object(request.content))})
+
+    def _session_renewed(self, _request: httpx.Request, session_id: str) -> httpx.Response:
+        if session_id not in self._sessions:
+            return httpx.Response(404, text=f"Session id '{session_id}' not found")
+
+        return httpx.Response(200, json=[self._sessions[session_id]])
+
+    def _session_destroyed(self, _request: httpx.Request, session_id: str) -> httpx.Response:
+        self._destroy_session(session_id)
+
+        return httpx.Response(200, json=True)
+
+    def _session_read(self, _request: httpx.Request, session_id: str) -> httpx.Response:
+        session = self._sessions.get(session_id)
+
+        return self._read([] if session is None else [session])
+
+    def _create_session(self, fields: Mapping[str, object]) -> str:
+        self._created_sessions += 1
+        self._changed()
+
+        session_id = f"a0b1c2d3-e4f5-a6b7-c8d9-{self._created_sessions:012d}"
+        lock_delay = fields.get("LockDelay")
+
+        self._sessions[session_id] = {
+            "ID": session_id,
+            "Name": fields.get("Name", ""),
+            "Node": NODE,
+            "Behavior": fields.get("Behavior", "release"),
+            "TTL": fields.get("TTL", ""),
+            "LockDelay": (
+                parse_duration(lock_delay) if isinstance(lock_delay, str) else _DEFAULT_LOCK_DELAY
+            )
+            // timedelta(microseconds=1)
+            * 1000,
+            "CreateIndex": self._index,
+        }
+
+        return session_id
+
+    def _destroy_session(self, session_id: str) -> None:
+        """End a session: its keys are released, or deleted with the ``delete`` behavior."""
+        session = self._sessions.pop(session_id, None)
+        if session is None:
+            return
+
+        self._changed()
+
+        for key, entry in list(self._entries.items()):
+            if entry.session != session_id:
+                continue
+
+            if session["Behavior"] == "delete":
+                del self._entries[key]
+            else:
+                self._entries[key] = dataclasses.replace(
+                    entry, session=None, modify_index=self._index
+                )
+
     def _instances(self, name: str, tag: str | None) -> list[tuple[str, dict[str, object]]]:
         return [
             (service_id, service)
@@ -359,8 +453,9 @@ class InMemoryAgent:
             return httpx.Response(200, json=False)
 
         if request.method == "PUT":
-            self._write(key, request.content, int(parameters.get("flags", "0")), current)
-        elif request.method == "DELETE":
+            return self._respond_write(key, request.content, parameters, current)
+
+        if request.method == "DELETE":
             self._delete(key, recurse="recurse" in parameters)
         else:
             return httpx.Response(405)
@@ -378,18 +473,50 @@ class InMemoryAgent:
 
         return [_entry_payload(entry) for entry in found]
 
-    def _write(self, key: str, value: bytes, flags: int, current: Entry | None) -> None:
+    def _respond_write(
+        self,
+        key: str,
+        value: bytes,
+        parameters: Mapping[str, str],
+        current: Entry | None,
+    ) -> httpx.Response:
+        """Write a key, locking or unlocking it for a session like Consul does."""
+        session = None if current is None else current.session
+        lock_index = 0 if current is None else current.lock_index
+        acquire = parameters.get("acquire")
+        release = parameters.get("release")
+
+        if acquire is not None:
+            if acquire not in self._sessions:
+                return httpx.Response(500, text=f'invalid session "{acquire}"')
+
+            if session not in {None, acquire}:
+                return httpx.Response(200, json=False)
+
+            if session is None:
+                lock_index += 1
+
+            session = acquire
+
+        if release is not None:
+            if session != release:
+                return httpx.Response(200, json=False)
+
+            session = None
+
         self._changed()
 
         self._entries[key] = Entry(
             key=key,
             value=value,
-            flags=flags,
+            flags=int(parameters.get("flags", "0")),
             modify_index=self._index,
             create_index=self._index if current is None else current.create_index,
-            lock_index=0,
-            session=None,
+            lock_index=lock_index,
+            session=session,
         )
+
+        return httpx.Response(200, json=True)
 
     def _delete(self, key: str, *, recurse: bool) -> None:
         self._changed()
@@ -418,7 +545,7 @@ def _key_names(prefix: str, names: list[str], separator: str | None) -> list[str
 
 
 def _entry_payload(entry: Entry) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "Key": entry.key,
         "Value": base64.b64encode(entry.value).decode() if entry.value else None,
         "Flags": entry.flags,
@@ -426,6 +553,11 @@ def _entry_payload(entry: Entry) -> dict[str, object]:
         "ModifyIndex": entry.modify_index,
         "LockIndex": entry.lock_index,
     }
+
+    if entry.session is not None:
+        payload["Session"] = entry.session
+
+    return payload
 
 
 def _tags(service: Mapping[str, object]) -> list[str]:

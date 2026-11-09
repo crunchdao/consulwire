@@ -10,8 +10,11 @@ from consulwire.agent import Agent, AsyncAgent
 from consulwire.catalog import AsyncCatalog, Catalog
 from consulwire.health import AsyncHealth, Health
 from consulwire.kv import KV, AsyncKV
+from consulwire.locks import DEFAULT_TTL, AsyncLock, Lock
+from consulwire.session import AsyncSessions, Sessions
 
 if TYPE_CHECKING:
+    from datetime import timedelta
     from types import TracebackType
 
     import httpx
@@ -46,6 +49,9 @@ class Consul:
     kv: KV
     """Key/value store."""
 
+    session: Sessions
+    """Sessions, which hold locks on keys of the store."""
+
     def __init__(
         self,
         url: str | None = None,
@@ -79,6 +85,45 @@ class Consul:
         self.catalog = Catalog(self._transport)
         self.health = Health(self._transport)
         self.kv = KV(self._transport)
+        self.session = Sessions(self._transport)
+
+    def lock(
+        self,
+        key: str,
+        *,
+        value: bytes | str = b"",
+        ttl: timedelta = DEFAULT_TTL,
+        lock_delay: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> Lock:
+        """Return a lock on a key, held by one process of the cluster at a time while entered.
+
+        Example:
+            ```python
+            with consul.lock("jobs/nightly-report"):
+                send_report()
+            ```
+
+        Args:
+            key: Key of the lock, only used for it.
+            value: Value of the key while held, like the name of the holder.
+            ttl: Time after the last renewal before Consul ends the session of a process that
+                died, freeing the lock. Between 10 seconds and a day.
+            lock_delay: Time the key stays unlockable after a holder's session ended, 15 seconds
+                by default. A process that lost the lock notices it before another takes it.
+            timeout: Longest wait for the key: entering raises ``TimeoutError`` after it.
+                ``timedelta(0)`` only tries once. As long as needed by default.
+        """
+        return Lock(
+            self.kv,
+            self.session,
+            self._transport,
+            key,
+            value=value,
+            ttl=ttl,
+            lock_delay=lock_delay,
+            timeout=timeout,
+        )
 
     def close(self) -> None:
         """Close the connections to the agent."""
@@ -121,6 +166,9 @@ class AsyncConsul:
     kv: AsyncKV
     """Key/value store."""
 
+    session: AsyncSessions
+    """Sessions, which hold locks on keys of the store."""
+
     def __init__(
         self,
         url: str | None = None,
@@ -146,6 +194,28 @@ class AsyncConsul:
         self.catalog = AsyncCatalog(self._transport)
         self.health = AsyncHealth(self._transport)
         self.kv = AsyncKV(self._transport)
+        self.session = AsyncSessions(self._transport)
+
+    def lock(
+        self,
+        key: str,
+        *,
+        value: bytes | str = b"",
+        ttl: timedelta = DEFAULT_TTL,
+        lock_delay: timedelta | None = None,
+        timeout: timedelta | None = None,
+    ) -> AsyncLock:
+        """See :meth:`Consul.lock`, entered with ``async with``."""
+        return AsyncLock(
+            self.kv,
+            self.session,
+            self._transport,
+            key,
+            value=value,
+            ttl=ttl,
+            lock_delay=lock_delay,
+            timeout=timeout,
+        )
 
     async def close(self) -> None:
         """Close the connections to the agent."""

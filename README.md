@@ -20,6 +20,10 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 		- [Healthy Instances](#healthy-instances)
 		- [Every Instance](#every-instance)
 		- [Call Another Service](#call-another-service)
+	- [Locks](#locks)
+		- [Hold a Lock](#hold-a-lock)
+		- [When a Lock Is Lost](#when-a-lock-is-lost)
+		- [Sessions](#sessions)
 	- [Asynchronous Client](#asynchronous-client)
 	- [Errors](#errors)
 	- [Testing](#testing)
@@ -97,6 +101,7 @@ The client is organized like the [Consul HTTP API](https://developer.hashicorp.c
 | `consul.kv`      | The [key/value store](#keyvalue-store).                                          |
 | `consul.health`  | The [healthy instances](#healthy-instances) of a service, the ones to call.     |
 | `consul.catalog` | [Every instance](#every-instance) of every service, healthy or not.              |
+| `consul.session` | [Sessions](#sessions), which lock keys of the store: see [`consul.lock`](#locks). |
 
 ### Register a Service
 
@@ -399,6 +404,78 @@ def create_order(body: dict) -> dict:
 > [!TIP]
 > The client must stay open as long as the rotation is used: the watch shares it. When the agent restarts, the watch fails, waits 5 seconds and starts again, while `pick` keeps the last known instances.
 
+## Locks
+
+### Hold a Lock
+
+`consul.lock(key)` runs a block in one process of the cluster at a time, like a scheduled job several instances could start:
+
+```python
+with consul.lock("jobs/nightly-report"):
+    send_report()
+```
+
+Entering waits as long as another process holds the key. With a `timeout`, it raises `TimeoutError` instead, and `timedelta(0)` only tries once, to skip work another instance is already doing:
+
+```python
+from datetime import timedelta
+
+try:
+    with consul.lock("jobs/nightly-report", timeout=timedelta(0)):
+        send_report()
+except TimeoutError:
+    pass  # another instance is sending it
+```
+
+| Option       | Meaning                                                                                                  |
+| ------------ | -------------------------------------------------------------------------------------------------------- |
+| `value`      | Value of the key while held, like the name of the holder.                                                |
+| `ttl`        | Time after the last renewal before Consul frees the lock of a process that died. 15 seconds by default, 10 at least. |
+| `lock_delay` | Time the key stays unlockable after its holder's session ended, 15 seconds by default.                  |
+| `timeout`    | Longest wait for the key, as long as needed by default.                                                  |
+
+With the asynchronous client, it is `async with consul.lock(...)`.
+
+> [!NOTE]
+> A lock is a [session](#sessions) holding the key, renewed every half TTL from a thread, or a task with the asynchronous client. Leaving releases the key first, so the next process takes it at once, then ends the session.
+
+### When a Lock Is Lost
+
+A process that dies holds nothing for long: Consul ends its session once the TTL ran out, up to twice the TTL, then the key stays unlockable for the lock delay. With the defaults, another process takes over 30 to 45 seconds later.
+
+The lock can also be lost while held: when the agent or the network fails for longer than the TTL, the session ends, and another process may take the key after the lock delay. The code holding it keeps running, since nothing can stop it from outside, so:
+
+- `lock.lost` is set: check it before doing what must not happen twice;
+- `lock.lock_index` grows with every holder: pass it to the systems the code writes to, so they refuse the writes of an older holder.
+
+```python
+with consul.lock("jobs/nightly-report") as lock:
+    report = build_report()
+
+    if lock.lost.is_set():
+        raise RuntimeError("another instance may be sending it too")
+
+    send(report)
+```
+
+> [!TIP]
+> The lock delay is the margin: a holder notices the loss within its TTL, while no other process can take the key before the lock delay ran out.
+
+### Sessions
+
+Locks are built on `consul.session`, which is also available directly. A session holds keys with `acquire=` and `release=`, and they are released, or deleted with `behavior="delete"`, when it ends:
+
+```python
+# a presence list: the key of each worker disappears when the worker stops renewing
+session_id = consul.session.create(ttl=timedelta(seconds=30), behavior="delete")
+consul.kv.put("workers/worker-1", "alive", acquire=session_id)
+
+consul.session.renew(session_id)  # False once the session ended
+consul.session.destroy(session_id)
+```
+
+A session also ends when its node fails, or when one of its `service_checks` fails. `consul.session.info(session_id)` returns it, or `None` once it ended.
+
 ## Asynchronous Client
 
 `AsyncConsul` has the same API, with coroutines:
@@ -438,7 +515,7 @@ except ConsulError as error:
 
 ## Testing
 
-`consulwire.testing.InMemoryAgent` answers both clients from memory, the way an agent would: service registration, the catalog and health lookups, and the key/value store with check-and-set, all with blocking queries. An application and its integration are tested without Consul:
+`consulwire.testing.InMemoryAgent` answers both clients from memory, the way an agent would: service registration and TTL checks, the catalog and health lookups, the key/value store with check-and-set, and sessions with their locks, all with blocking queries. An application and its integration are tested without Consul:
 
 ```python
 from consulwire.testing import InMemoryAgent
@@ -461,7 +538,7 @@ assert agent.services == {}  # deregistered at shutdown
 | `agent.requests`                               | Every request received, as `httpx.Request`.                                    |
 | `agent.set_passing(service_id, passing=False)` | Make an instance fail its checks, to test a caller: it leaves `health.service`. |
 
-Instances pass their checks until told otherwise, except the ones with a TTL check, which start critical until they report. The time to live itself never runs out. Other endpoints answer `404`.
+Instances pass their checks until told otherwise, except the ones with a TTL check, which start critical until they report. Sessions lock keys like in Consul. Time does not pass in the agent: TTLs never run out and keys have no lock delay, so a test ends a session to lose its lock, with `consul.session.destroy(lock.session_id)`. Other endpoints answer `404`.
 
 # Integrations
 

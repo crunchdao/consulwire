@@ -64,13 +64,15 @@ class KV:
 
         return _requests.parse_keys(self._transport.send(request))
 
-    def put(
+    def put(  # noqa: PLR0913  # the options of a Consul write
         self,
         key: str,
         value: bytes | str,
         *,
         flags: int | None = None,
         cas: int | None = None,
+        acquire: str | None = None,
+        release: str | None = None,
     ) -> bool:
         """Write a key, creating it when it does not exist.
 
@@ -80,16 +82,22 @@ class KV:
             flags: Number to attach to the key, for the application's own use.
             cas: Check-and-set: write only when the key's ``modify_index`` is still this one. ``0``
                 writes only when the key does not exist.
+            acquire: Session ID: write and lock the key for this session, only when no other
+                session holds it. :meth:`consulwire.Consul.lock` does it for you.
+            release: Session ID: write and unlock the key, only when this session holds it.
 
         Returns:
-            Whether the key was written: ``False`` only when ``cas`` did not match.
+            Whether the key was written: ``False`` when ``cas`` did not match, or the lock is held
+            by another session.
 
         Raises:
+            ValueError: Both ``acquire`` and ``release`` are given.
             TransportError: The agent could not be reached.
-            HTTPStatusError: The agent refused the request, like 413 for a value over 512 KB.
+            HTTPStatusError: The agent refused the request, like 413 for a value over 512 KB, or
+                500 for a session that does not exist.
             ResponseError: The agent answered something else than ``true`` or ``false``.
         """
-        request = _requests.put(key, value, flags=flags, cas=cas)
+        request = _requests.put(key, value, flags=flags, cas=cas, acquire=acquire, release=release)
 
         return _requests.parse_boolean(self._transport.send(request))
 
@@ -193,16 +201,18 @@ class AsyncKV:
 
         return _requests.parse_keys(await self._transport.send(request))
 
-    async def put(
+    async def put(  # noqa: PLR0913  # the options of a Consul write
         self,
         key: str,
         value: bytes | str,
         *,
         flags: int | None = None,
         cas: int | None = None,
+        acquire: str | None = None,
+        release: str | None = None,
     ) -> bool:
         """See :meth:`KV.put`."""
-        request = _requests.put(key, value, flags=flags, cas=cas)
+        request = _requests.put(key, value, flags=flags, cas=cas, acquire=acquire, release=release)
 
         return _requests.parse_boolean(await self._transport.send(request))
 
