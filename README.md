@@ -28,6 +28,7 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 	- [Errors](#errors)
 	- [Testing](#testing)
 - [Integrations](#integrations)
+	- [Examples](#examples)
 	- [What Every Integration Does](#what-every-integration-does)
 		- [The Address](#the-address)
 		- [The Health Route](#the-health-route)
@@ -569,6 +570,25 @@ Each framework or server has its own module in `consulwire.integrations`. The fr
 | FastAPI, and any Starlette app                       | `consulwire.integrations.fastapi`  | `consulwire[fastapi]` | `ConsulLifespan`         |
 | Django, for `runserver`                              | `consulwire.integrations.django`   | `consulwire[django]`  | the app and `CONSULWIRE` |
 | gunicorn, with any framework, [Django](#with-django) | `consulwire.integrations.gunicorn` | none                  | `ConsulHooks`            |
+
+## Examples
+
+[`examples/`](examples) holds an application for each integration. Start a Consul agent:
+
+```bash
+docker run --rm -p 8500:8500 --add-host=host.docker.internal:host-gateway hashicorp/consul:1.20 agent -dev -client 0.0.0.0
+```
+
+Then run an example from its directory, after installing what its docstring lists:
+
+| Example                       | What it shows                                               | Run                                                             |
+| ----------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------- |
+| [Flask](examples/flask)       | `ConsulExtension`, registering from `application.run()`     | `CONSUL_HOST=localhost python app.py`                           |
+| [FastAPI](examples/fastapi)   | `ConsulLifespan`, registering at startup                    | `CONSUL_HOST=localhost python main.py`                          |
+| [Django](examples/django)     | the app, registering `runserver`, and `gunicorn.conf.py`    | `CONSUL_HOST=localhost python manage.py runserver 0.0.0.0:8000` |
+| [gunicorn](examples/gunicorn) | `ConsulHooks`, registering a Flask application with workers | `CONSUL_HOST=localhost gunicorn`                                |
+
+The instance appears in the Consul UI, at <http://localhost:8500>, with its check passing. The Django example registers `host.docker.internal`, which `--add-host` resolves on Linux too.
 
 ## What Every Integration Does
 

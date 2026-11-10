@@ -95,8 +95,9 @@ exclude_also = [
 
 [tool.mypy]
 python_version = "3.10"
-files = ["src", "tests"]
+files = ["src", "tests", "examples"]
 mypy_path = "src"
+explicit_package_bases = true # each example has its own app.py or main.py
 strict = true
 warn_unreachable = true
 disallow_any_unimported = true
@@ -128,10 +129,14 @@ follow_imports_for_stubs = true
 # --------------------------------------------------------------------------- basedpyright
 
 [tool.basedpyright]
-include = ["src", "tests"]
+include = ["src", "tests", "examples"]
 pythonVersion = "3.10"
 typeCheckingMode = "all"
 reportImplicitStringConcatenation = false # conflicts with ruff's formatter
+
+[[tool.basedpyright.executionEnvironments]]
+root = "examples"
+reportUnusedCallResult = false # ConsulExtension(application, ...), like the README
 
 # --------------------------------------------------------------------------- ruff
 
@@ -159,6 +164,12 @@ ignore = [
     "S104",    # binding to all interfaces is what the services do
     "S105",    # fake secrets
     "S106",
+]
+"examples/**" = [
+    "D103",   # the routes say what they do
+    "INP001", # applications, not packages
+    "S104",   # binding to all interfaces is what the services do
+    "S105",   # fake secrets
 ]
 
 [tool.ruff.lint.flake8-tidy-imports]
