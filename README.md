@@ -1,6 +1,6 @@
 # consulwire
 
-A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, and integrations that register Flask, FastAPI and gunicorn applications in it. It ships a synchronous and an asynchronous client with the same API, fully typed.
+A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, and integrations that register Flask, FastAPI, Django and gunicorn applications in it. It ships a synchronous and an asynchronous client with the same API, fully typed.
 
 - [consulwire](#consulwire)
 - [Installation](#installation)
@@ -43,11 +43,17 @@ A Python client for the [Consul](https://developer.hashicorp.com/consul) agent, 
 		- [With a Lifespan of your Own](#with-a-lifespan-of-your-own)
 		- [Reload and Workers](#reload-and-workers)
 		- [Options](#options-1)
-	- [gunicorn](#gunicorn)
+	- [Django](#django)
 		- [Setup](#setup-2)
+		- [The Address in Development](#the-address-in-development)
+		- [In Production](#in-production)
+		- [Options](#options-2)
+	- [gunicorn](#gunicorn)
+		- [Setup](#setup-3)
+		- [With Django](#with-django)
 		- [Workers](#workers)
 		- [Binary Upgrades](#binary-upgrades)
-		- [Options](#options-2)
+		- [Options](#options-3)
 
 # Installation
 
@@ -57,6 +63,7 @@ pip install consulwire
 # with the integration of your framework
 pip install "consulwire[flask]"
 pip install "consulwire[fastapi]"
+pip install "consulwire[django]"
 ```
 
 Python 3.10 or newer is required. The client depends on `httpx` and `anyio`. The gunicorn integration needs no extra.
@@ -556,11 +563,12 @@ Instances pass their checks until told otherwise, except the ones with a TTL che
 
 Each framework or server has its own module in `consulwire.integrations`. The framework ones need the matching extra:
 
-| Framework                      | Module                             | Extra                 | Entry point       |
-| ------------------------------ | ---------------------------------- | --------------------- | ----------------- |
-| Flask                          | `consulwire.integrations.flask`    | `consulwire[flask]`   | `ConsulExtension` |
-| FastAPI, and any Starlette app | `consulwire.integrations.fastapi`  | `consulwire[fastapi]` | `ConsulLifespan`  |
-| gunicorn, with any framework   | `consulwire.integrations.gunicorn` | none                  | `ConsulHooks`     |
+| Framework                                            | Module                             | Extra                 | Entry point              |
+| ---------------------------------------------------- | ---------------------------------- | --------------------- | ------------------------ |
+| Flask                                                | `consulwire.integrations.flask`    | `consulwire[flask]`   | `ConsulExtension`        |
+| FastAPI, and any Starlette app                       | `consulwire.integrations.fastapi`  | `consulwire[fastapi]` | `ConsulLifespan`         |
+| Django, for `runserver`                              | `consulwire.integrations.django`   | `consulwire[django]`  | the app and `CONSULWIRE` |
+| gunicorn, with any framework, [Django](#with-django) | `consulwire.integrations.gunicorn` | none                  | `ConsulHooks`            |
 
 ## What Every Integration Does
 
@@ -582,7 +590,7 @@ Consul checks the application at `health_path`, `/health` by default:
 - when the application already has a `GET` route there, it is used as it is, so a real check, like a database ping, stays in charge;
 - otherwise, a route answering `200` is added right before the registration, once every route of the application is declared. FastAPI leaves it out of the OpenAPI schema.
 
-Under gunicorn, the Flask and FastAPI integrations still add it, while [the hooks](#gunicorn) register the application.
+Under gunicorn, the Flask and FastAPI integrations still add it, while [the hooks](#gunicorn) register the application. Django is the exception: its project declares the route, and `runserver` warns when it is missing.
 
 ### The Access Logs
 
@@ -592,6 +600,7 @@ Consul calls the health route every 10 seconds. Those calls are hidden from the 
 | ----------- | ----------------------------------- |
 | Flask       | `werkzeug`, `gunicorn.access`       |
 | FastAPI     | `uvicorn.access`, `gunicorn.access` |
+| Django      | `django.server`, of `runserver`     |
 | gunicorn    | `gunicorn.access`, `uvicorn.access` |
 
 Only the `GET` requests of the health route are hidden. `log_health_checks=True` keeps them.
@@ -600,11 +609,12 @@ Only the `GET` requests of the health route are hidden. `log_health_checks=True`
 
 An application is deregistered only when its framework has a shutdown event:
 
-| Integration | Deregistered                       |
-| ----------- | ---------------------------------- |
-| Flask       | never: Flask has no shutdown event |
-| FastAPI     | at the shutdown of the lifespan    |
-| gunicorn    | when gunicorn exits                |
+| Integration | Deregistered                             |
+| ----------- | ---------------------------------------- |
+| Flask       | never: Flask has no shutdown event       |
+| FastAPI     | at the shutdown of the lifespan          |
+| Django      | never: `runserver` has no shutdown event |
+| gunicorn    | when gunicorn exits                      |
 
 An instance that stopped without deregistering, after a crash or a `kill -9`, is removed by Consul once its health check has been failing for `deregister_critical_after`, a minute by default, so about a minute and a half with Consul's reaping cycle. Restarting first replaces it: the instance ID is the service name.
 
@@ -769,6 +779,82 @@ ConsulLifespan(
 )
 ```
 
+## Django
+
+### Setup
+
+The app registers the development server of `python manage.py runserver`. List it before the apps that extend `runserver` too, like `django.contrib.staticfiles` or Daphne: it extends the one that would run without it, so they keep working.
+
+```python
+# my_project/settings.py
+INSTALLED_APPS = [
+    "consulwire.integrations.django",
+    "django.contrib.staticfiles",
+    ...,
+]
+
+CONSULWIRE = {"name": "my-service"}
+```
+
+Django does not add the health route by itself: the project declares it.
+
+```python
+# my_project/urls.py
+from django.http import HttpResponse
+from django.urls import path
+
+
+def health(request):
+    return HttpResponse()
+
+
+urlpatterns = [
+    path("health", health),
+    ...,
+]
+```
+
+`runserver` registers the server once it listens, with the port it is bound to. With the autoreloader, only the process serving the requests registers, again after every reload: the instance is replaced, its ID being the service name.
+
+> [!NOTE]
+> A warning is logged at startup when an app listed before this one extends `runserver`, since its `runserver` runs instead. Another one is logged when the health route is missing.
+
+### The Address in Development
+
+Consul checks `http://<address>:<port>/health`, so two things must hold:
+
+- `runserver` listens where the agent reaches it: by default, it only listens on `127.0.0.1`, which an agent in Docker cannot reach. Start it with `python manage.py runserver 0.0.0.0:8000`;
+- Django accepts the address as host: it answers `400 Bad Request` to a host missing from `ALLOWED_HOSTS`, and with `DEBUG = True`, it only allows `localhost` and `127.0.0.1` by default. The address found automatically is an IP address unknown in advance, so give the `address` the agent reaches the server at, and allow it: `host.docker.internal` for an agent in Docker Desktop, the name of the service in a Compose network.
+
+```python
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "host.docker.internal"]
+
+CONSULWIRE = {"name": "my-service", "address": "host.docker.internal"}
+```
+
+### In Production
+
+Under gunicorn, `runserver` does not run: [the gunicorn hooks](#with-django) register the application, and the app stays out of the way. Keep it installed, for development.
+
+### Options
+
+```python
+from consulwire.integrations.django import ConsulSettings
+
+CONSULWIRE: ConsulSettings = {
+    "name": "my-service",  # name other services look this one up by, required
+    "health_path": "/health",  # route Consul checks, declared by the project
+    "address": "host.docker.internal",  # found automatically when missing, see The Address
+    "check_interval": timedelta(seconds=10),  # time between two health checks
+    "deregister_critical_after": timedelta(minutes=1),  # None keeps dead instances
+    "tags": (),
+    "meta": {},
+    "log_health_checks": False,  # True keeps them in the runserver log
+}
+```
+
+`ConsulSettings` only exists to annotate the setting: it is a plain dictionary.
+
 ## gunicorn
 
 ### Setup
@@ -795,6 +881,34 @@ With hooks of your own, call these from yours, like `consul_hooks.when_ready(ser
 
 > [!NOTE]
 > The application must answer the health route: the Flask and FastAPI integrations add it when it is missing. With another framework, declare it.
+
+### With Django
+
+In production, Django runs under gunicorn, whose hooks register it. The project declares the health route, like in [the Django setup](#setup-2):
+
+```python
+# gunicorn.conf.py
+from consulwire.integrations.gunicorn import ConsulHooks
+
+wsgi_app = "my_project.wsgi:application"
+bind = "0.0.0.0:8000"
+workers = 4
+
+consul_hooks = ConsulHooks(name="my-service", address="my-service")
+
+when_ready = consul_hooks.when_ready
+on_exit = consul_hooks.on_exit
+```
+
+> [!IMPORTANT]
+> Consul checks `http://<address>:8000/health`, and Django answers `400 Bad Request` to a host missing from `ALLOWED_HOSTS`. The address found automatically is an IP address, unknown in advance: give the `address` other services reach the application at, like its name in a Docker network, and add it to `ALLOWED_HOSTS`:
+>
+> ```python
+> # my_project/settings.py
+> ALLOWED_HOSTS = ["my-service"]
+> ```
+
+`python manage.py runserver` does not go through gunicorn: in development, the [Django integration](#django) registers it.
 
 ### Workers
 

@@ -5,13 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "consulwire"
 dynamic = ["version"]
-description = "Strictly typed sync/async Consul client, with Flask, FastAPI and gunicorn integrations that register the application."
+description = "Strictly typed sync/async Consul client, with Flask, FastAPI, Django and gunicorn integrations that register the application."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Enzo Caceres", email = "enzo.caceres@crunchdao.com" }]
-keywords = ["consul", "service-discovery", "service-registry", "key-value", "flask", "fastapi", "starlette", "gunicorn"]
+keywords = ["consul", "service-discovery", "service-registry", "key-value", "flask", "fastapi", "starlette", "django", "gunicorn"]
 classifiers = [
     "Development Status :: 4 - Beta",
+    "Framework :: Django",
     "Framework :: FastAPI",
     "Framework :: Flask",
     "Intended Audience :: Developers",
@@ -34,6 +35,7 @@ dependencies = [
 [project.optional-dependencies]
 flask = ["flask>=2.2"]
 fastapi = ["starlette>=0.27"]
+django = ["django>=4.2"]
 
 [project.urls]
 Homepage = "https://github.com/crunchdao/consulwire"
@@ -46,6 +48,8 @@ Changelog = "https://github.com/crunchdao/consulwire/releases"
 dev = [
     "anyio>=4.0",
     "basedpyright>=1.20",
+    "django>=4.2",
+    "django-stubs>=5.0",
     "fastapi>=0.110",
     "flask>=3.0",
     "mypy>=1.13",

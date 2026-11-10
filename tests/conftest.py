@@ -34,7 +34,7 @@ def no_consul_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name)
 
 
-ACCESS_LOGGERS = ("werkzeug", "uvicorn.access", "gunicorn.access")
+ACCESS_LOGGERS = ("werkzeug", "uvicorn.access", "gunicorn.access", "django.server")
 
 
 @pytest.fixture(autouse=True)
